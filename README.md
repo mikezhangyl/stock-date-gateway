@@ -23,6 +23,7 @@ uv run uvicorn stock_data_gateway.main:app --host 127.0.0.1 --port 8700
 Live Tushare checks require both a token and an explicit opt-in:
 
 ```bash
+uv sync --extra dev --extra provider
 RUN_LIVE_PROVIDER_TESTS=1 TUSHARE_TOKEN=... uv run market-gateway-validate --live
 ```
 

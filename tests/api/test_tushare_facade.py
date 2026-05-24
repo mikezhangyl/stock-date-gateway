@@ -62,6 +62,7 @@ def test_health_reports_injected_provider_status(tmp_path) -> None:
 
 
 def test_default_app_health_handles_missing_tushare_token(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MARKET_DATA_HOME", str(tmp_path))
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
     app = create_app()
