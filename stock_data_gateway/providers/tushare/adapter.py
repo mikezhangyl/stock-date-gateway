@@ -47,8 +47,31 @@ def _frame_to_rows(frame: Any) -> list[dict[str, Any]]:
     columns = [str(column) for column in getattr(frame, "columns", [])]
     rows: list[dict[str, Any]] = []
     for _, row in frame.iterrows():
-        rows.append({column: row[column] for column in columns})
+        rows.append({column: _json_safe_cell(row[column]) for column in columns})
     return rows
+
+
+def _json_safe_cell(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, float) and value != value:
+            return None
+    except TypeError:
+        pass
+    try:
+        import pandas as pd
+
+        if bool(pd.isna(value)):
+            return None
+    except (ImportError, TypeError, ValueError):
+        pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            return value
+    return value
 
 
 def _project_response(response: ProviderResponse, requested_fields: list[str]) -> ProviderResponse:

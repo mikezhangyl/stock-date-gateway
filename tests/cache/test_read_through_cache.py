@@ -40,6 +40,53 @@ def test_read_through_cache_fetches_once_then_hits_cache(tmp_path) -> None:
     assert second.meta["source"] == "cache"
 
 
+def test_cache_projects_fni_tushare_facade_fields(tmp_path) -> None:
+    provider = FakeProvider()
+    gateway = service(tmp_path, provider)
+
+    daily = gateway.query(
+        "fake",
+        "daily",
+        {"ts_code": "000001.SZ", "start_date": "20240102", "end_date": "20240102"},
+        fields="ts_code,trade_date,pre_close,change,pct_chg",
+    )
+    daily_basic = gateway.query(
+        "fake",
+        "daily_basic",
+        {"ts_code": "000001.SZ"},
+        fields="ts_code,trade_date,pe_ttm,total_mv,circ_mv",
+    )
+    stock_basic = gateway.query(
+        "fake",
+        "stock_basic",
+        {"ts_code": "000001.SZ"},
+        fields="ts_code,symbol,name,industry",
+    )
+    income = gateway.query(
+        "fake",
+        "income",
+        {"ts_code": "000001.SZ"},
+        fields="ts_code,ann_date,end_date,report_type,total_revenue,n_income_attr_p",
+    )
+    indicator = gateway.query(
+        "fake",
+        "fina_indicator",
+        {"ts_code": "000001.SZ"},
+        fields="ts_code,ann_date,end_date,q_roe,grossprofit_margin,tr_yoy,netprofit_yoy",
+    )
+
+    assert daily.meta["status"] == "ok"
+    assert daily.data.items[0][2:] == [10.0, 0.5, 5.0]
+    assert daily_basic.meta["status"] == "ok"
+    assert daily_basic.data.items[0][2:] == [13.4, 10500000.0, 8400000.0]
+    assert stock_basic.meta["status"] == "ok"
+    assert stock_basic.data.items[0] == ["000001.SZ", "000001", "平安银行", "银行"]
+    assert income.meta["status"] == "ok"
+    assert income.data.items[0][3:] == ["1", 100000.0, 14000.0]
+    assert indicator.meta["status"] == "ok"
+    assert indicator.data.items[0][3:] == [3.2, 31.0, 8.0, 9.0]
+
+
 def test_partial_hit_only_fetches_missing_dates(tmp_path) -> None:
     provider = FakeProvider()
     gateway = service(tmp_path, provider)

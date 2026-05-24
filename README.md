@@ -13,10 +13,32 @@ The service is intentionally local-first: SQLite cache, fake-provider tests by d
 ## Development
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev --extra provider
 uv run pytest
 uv run uvicorn stock_data_gateway.main:app --host 127.0.0.1 --port 8700
 ```
+
+Put provider secrets in `.env.local`; the gateway owns the real Tushare token and
+does not trust or forward caller-supplied tokens.
+
+## Fund Narrative Intelligence
+
+`fund-narrative-intelligence` should integrate through the local HTTP facade, not
+through Python imports from this project:
+
+```bash
+uv run uvicorn stock_data_gateway.main:app --host 127.0.0.1 --port 8700
+```
+
+Then run FNI with:
+
+```bash
+TUSHARE_API_URL=http://127.0.0.1:8700/tushare
+```
+
+The gateway supports the Tushare endpoints currently exercised by FNI market
+quotes, valuation snapshots, and financial metrics: `daily`, `daily_basic`,
+`stock_basic`, `income`, and `fina_indicator`.
 
 ## Live Validation
 

@@ -10,9 +10,22 @@ from tests.fakes import FakeFrame
 class FakeTusharePro:
     def __init__(self) -> None:
         self.cyq_calls: list[dict[str, str]] = []
+        self.daily_calls: list[dict[str, str]] = []
         self.trade_cal_calls: list[dict[str, str]] = []
         self.failures_before_success = 0
         self.error: Optional[Exception] = None
+
+    def daily(self, **kwargs):
+        self.daily_calls.append(kwargs)
+        return FakeFrame(
+            [
+                {
+                    "ts_code": kwargs["ts_code"],
+                    "trade_date": kwargs.get("trade_date") or kwargs["end_date"],
+                    "close": 10.5,
+                }
+            ]
+        )
 
     def trade_cal(self, **kwargs):
         self.trade_cal_calls.append(kwargs)
@@ -115,9 +128,7 @@ def test_chip_distribution_redacts_secret_like_values_from_retry_events() -> Non
     fake_pro = FakeTusharePro()
     token_fragment = "token"
     api_key_fragment = "api" + "_key"
-    fake_pro.error = RuntimeError(
-        f'network failed {token_fragment}="secret-token-value" {api_key_fragment}=abc123'
-    )
+    fake_pro.error = RuntimeError(f'network failed {token_fragment}="secret-token-value" {api_key_fragment}=abc123')
     client = make_client(fake_pro, max_retries=1)
     events: list[dict] = []
     client.set_retry_event_handler(events.append)
@@ -128,3 +139,16 @@ def test_chip_distribution_redacts_secret_like_values_from_retry_events() -> Non
     assert "[REDACTED]" in events[0]["raw_error_message"]
     assert "secret-token-value" not in events[0]["raw_error_message"]
     assert "abc123" not in events[0]["raw_error_message"]
+
+
+def test_fetch_dataframe_expands_latest_daily_query_to_recent_window() -> None:
+    fake_pro = FakeTusharePro()
+    client = make_client(fake_pro)
+
+    frame = client.fetch_dataframe("daily", {"ts_code": "000001.SZ"}, fields="ts_code,trade_date,close")
+
+    assert not frame.empty
+    assert fake_pro.daily_calls[0]["ts_code"] == "000001.SZ"
+    assert "start_date" in fake_pro.daily_calls[0]
+    assert "end_date" in fake_pro.daily_calls[0]
+    assert "trade_date" not in fake_pro.daily_calls[0]

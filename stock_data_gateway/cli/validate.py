@@ -35,8 +35,38 @@ class ValidationFakeProvider(ExternalDataProvider):
                         "high": 11.0,
                         "low": 9.5,
                         "close": 10.5,
+                        "pre_close": 10.0,
+                        "change": 0.5,
+                        "pct_chg": 5.0,
                         "vol": 1000.0,
                         "amount": 10500.0,
+                    }
+                ],
+            )
+        if endpoint == "daily_basic":
+            return ProviderResponse.from_rows(
+                provider=self.provider_name,
+                endpoint=endpoint,
+                rows=[
+                    {
+                        "ts_code": params["ts_code"],
+                        "trade_date": params.get("trade_date", "20240102"),
+                        "close": 10.5,
+                        "turnover_rate": 1.2,
+                        "turnover_rate_f": 1.1,
+                        "volume_ratio": 0.9,
+                        "pe": 12.3,
+                        "pe_ttm": 13.4,
+                        "pb": 1.5,
+                        "ps": 2.1,
+                        "ps_ttm": 2.2,
+                        "dv_ratio": 0.7,
+                        "dv_ttm": 0.8,
+                        "total_share": 1000000.0,
+                        "float_share": 800000.0,
+                        "free_share": 700000.0,
+                        "total_mv": 10500000.0,
+                        "circ_mv": 8400000.0,
                     }
                 ],
             )
@@ -44,13 +74,75 @@ class ValidationFakeProvider(ExternalDataProvider):
             return ProviderResponse.from_rows(
                 provider=self.provider_name,
                 endpoint=endpoint,
-                rows=[{"exchange": "SSE", "cal_date": params["cal_date"], "is_open": "1"}],
+                rows=[
+                    {
+                        "exchange": "SSE",
+                        "cal_date": params["cal_date"],
+                        "is_open": "1",
+                        "pretrade_date": "20231229",
+                    }
+                ],
             )
         if endpoint == "stock_basic":
             return ProviderResponse.from_rows(
                 provider=self.provider_name,
                 endpoint=endpoint,
-                rows=[{"ts_code": params.get("ts_code", "000001.SZ"), "name": "平安银行"}],
+                rows=[
+                    {
+                        "ts_code": params.get("ts_code", "000001.SZ"),
+                        "symbol": "000001",
+                        "name": "平安银行",
+                        "area": "深圳",
+                        "industry": "银行",
+                        "market": "主板",
+                        "exchange": "SZSE",
+                        "list_status": "L",
+                        "list_date": "19910403",
+                    }
+                ],
+            )
+        if endpoint == "income":
+            return ProviderResponse.from_rows(
+                provider=self.provider_name,
+                endpoint=endpoint,
+                rows=[
+                    {
+                        "ts_code": params["ts_code"],
+                        "ann_date": "20240420",
+                        "f_ann_date": "20240420",
+                        "end_date": "20240331",
+                        "report_type": "1",
+                        "comp_type": "1",
+                        "total_revenue": 100000.0,
+                        "revenue": 90000.0,
+                        "operate_profit": 20000.0,
+                        "total_profit": 18000.0,
+                        "n_income": 15000.0,
+                        "n_income_attr_p": 14000.0,
+                    }
+                ],
+            )
+        if endpoint == "fina_indicator":
+            return ProviderResponse.from_rows(
+                provider=self.provider_name,
+                endpoint=endpoint,
+                rows=[
+                    {
+                        "ts_code": params["ts_code"],
+                        "ann_date": "20240420",
+                        "end_date": "20240331",
+                        "eps": 0.5,
+                        "dt_eps": 0.45,
+                        "total_revenue_ps": 2.3,
+                        "q_roe": 3.2,
+                        "roe": 12.5,
+                        "grossprofit_margin": 31.0,
+                        "debt_to_assets": 42.0,
+                        "tr_yoy": 8.0,
+                        "netprofit_yoy": 9.0,
+                        "dt_netprofit_yoy": 7.5,
+                    }
+                ],
             )
         if endpoint == "cyq_chips":
             return ProviderResponse.from_rows(

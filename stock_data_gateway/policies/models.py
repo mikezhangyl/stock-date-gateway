@@ -112,7 +112,7 @@ class EndpointPolicy:
     def _fetch_params_for_date(self, params: dict[str, Any], date_key: str) -> dict[str, Any]:
         excluded = {self.range_start_param, self.range_end_param, "token", "_coverage_dates"}
         fetch_params = {key: value for key, value in params.items() if key not in excluded and value is not None}
-        if self.date_param is not None:
+        if self.date_param is not None and date_key != self.snapshot_date_key:
             fetch_params[self.date_param] = date_key
         return fetch_params
 

@@ -23,6 +23,15 @@ def test_daily_policy_builds_semantic_coverage_per_trade_date() -> None:
     assert all("fields" not in item.key.semantic_params for item in requirements)
 
 
+def test_daily_policy_uses_latest_semantic_without_sending_literal_latest_date() -> None:
+    policy = registry().get("tushare", "daily")
+
+    requirements = policy.build_requirements({"ts_code": "000001.SZ"})
+
+    assert requirements[0].key.date_key == "latest"
+    assert requirements[0].fetch_params == {"ts_code": "000001.SZ"}
+
+
 def test_stock_basic_policy_uses_snapshot_query_scope() -> None:
     policy = registry().get("tushare", "stock_basic")
 
@@ -50,6 +59,36 @@ def test_default_policy_registry_registers_tushare_daily() -> None:
     policies = create_default_policy_registry()
 
     assert policies.get("tushare", "daily").endpoint == "daily"
+
+
+def test_policy_defaults_cover_fni_tushare_facade_fields() -> None:
+    policies = registry()
+
+    required_fields = {
+        "daily": {"pre_close", "change", "pct_chg"},
+        "index_daily": {"pre_close", "vol", "amount"},
+        "fund_daily": {"pre_close", "vol", "amount"},
+        "daily_basic": {"pe_ttm", "total_mv", "circ_mv"},
+        "stock_basic": {"symbol", "industry", "area", "list_date"},
+        "income": {"ann_date", "end_date", "report_type", "total_revenue", "n_income_attr_p"},
+        "fina_indicator": {"q_roe", "grossprofit_margin", "tr_yoy", "netprofit_yoy"},
+    }
+
+    for endpoint, fields in required_fields.items():
+        policy = policies.get("tushare", endpoint)
+        assert fields.issubset(set(policy.default_fields))
+
+
+def test_income_and_indicator_policies_use_snapshot_query_scope() -> None:
+    policies = registry()
+
+    income = policies.get("tushare", "income").build_requirements({"ts_code": "000001.SZ"})
+    indicator = policies.get("tushare", "fina_indicator").build_requirements({"ts_code": "000001.SZ"})
+
+    assert income[0].key.date_key_role == "snapshot_date"
+    assert indicator[0].key.date_key_role == "snapshot_date"
+    assert income[0].fetch_params == {"ts_code": "000001.SZ"}
+    assert indicator[0].fetch_params == {"ts_code": "000001.SZ"}
 
 
 def test_bad_date_range_is_rejected() -> None:

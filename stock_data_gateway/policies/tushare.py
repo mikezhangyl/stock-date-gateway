@@ -13,9 +13,21 @@ def register_tushare_policies(registry: PolicyRegistry, provider_name: str = "tu
             date_param="trade_date",
             range_start_param="start_date",
             range_end_param="end_date",
-            default_fields=["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"],
+            default_fields=[
+                "ts_code",
+                "trade_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "pre_close",
+                "change",
+                "pct_chg",
+                "vol",
+                "amount",
+            ],
             date_key_role="trade_date",
-            schema_version=1,
+            schema_version=2,
         )
     )
     registry.register(
@@ -26,9 +38,28 @@ def register_tushare_policies(registry: PolicyRegistry, provider_name: str = "tu
             date_param="trade_date",
             range_start_param="start_date",
             range_end_param="end_date",
-            default_fields=["ts_code", "trade_date", "close", "turnover_rate", "volume_ratio", "pe", "pb"],
+            default_fields=[
+                "ts_code",
+                "trade_date",
+                "close",
+                "turnover_rate",
+                "turnover_rate_f",
+                "volume_ratio",
+                "pe",
+                "pe_ttm",
+                "pb",
+                "ps",
+                "ps_ttm",
+                "dv_ratio",
+                "dv_ttm",
+                "total_share",
+                "float_share",
+                "free_share",
+                "total_mv",
+                "circ_mv",
+            ],
             date_key_role="trade_date",
-            schema_version=1,
+            schema_version=2,
         )
     )
     registry.register(
@@ -39,9 +70,21 @@ def register_tushare_policies(registry: PolicyRegistry, provider_name: str = "tu
             date_param="trade_date",
             range_start_param="start_date",
             range_end_param="end_date",
-            default_fields=["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"],
+            default_fields=[
+                "ts_code",
+                "trade_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "pre_close",
+                "change",
+                "pct_chg",
+                "vol",
+                "amount",
+            ],
             date_key_role="trade_date",
-            schema_version=1,
+            schema_version=2,
         )
     )
     registry.register(
@@ -52,9 +95,21 @@ def register_tushare_policies(registry: PolicyRegistry, provider_name: str = "tu
             date_param="trade_date",
             range_start_param="start_date",
             range_end_param="end_date",
-            default_fields=["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"],
+            default_fields=[
+                "ts_code",
+                "trade_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "pre_close",
+                "change",
+                "pct_chg",
+                "vol",
+                "amount",
+            ],
             date_key_role="trade_date",
-            schema_version=1,
+            schema_version=2,
         )
     )
     registry.register(
@@ -65,9 +120,9 @@ def register_tushare_policies(registry: PolicyRegistry, provider_name: str = "tu
             date_param="cal_date",
             range_start_param="start_date",
             range_end_param="end_date",
-            default_fields=["exchange", "cal_date", "is_open"],
+            default_fields=["exchange", "cal_date", "is_open", "pretrade_date"],
             date_key_role="calendar_date",
-            schema_version=1,
+            schema_version=2,
         )
     )
     registry.register(
@@ -75,7 +130,66 @@ def register_tushare_policies(registry: PolicyRegistry, provider_name: str = "tu
             provider=provider_name,
             endpoint="stock_basic",
             instrument_param="ts_code",
-            default_fields=["ts_code", "name"],
+            default_fields=[
+                "ts_code",
+                "symbol",
+                "name",
+                "area",
+                "industry",
+                "market",
+                "exchange",
+                "list_status",
+                "list_date",
+            ],
+            date_key_role="snapshot_date",
+            snapshot_date_key="latest",
+            schema_version=2,
+        )
+    )
+    registry.register(
+        EndpointPolicy(
+            provider=provider_name,
+            endpoint="income",
+            instrument_param="ts_code",
+            default_fields=[
+                "ts_code",
+                "ann_date",
+                "f_ann_date",
+                "end_date",
+                "report_type",
+                "comp_type",
+                "total_revenue",
+                "revenue",
+                "operate_profit",
+                "total_profit",
+                "n_income",
+                "n_income_attr_p",
+            ],
+            date_key_role="snapshot_date",
+            snapshot_date_key="latest",
+            schema_version=1,
+        )
+    )
+    registry.register(
+        EndpointPolicy(
+            provider=provider_name,
+            endpoint="fina_indicator",
+            instrument_param="ts_code",
+            default_fields=[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "eps",
+                "dt_eps",
+                "total_revenue_ps",
+                "q_roe",
+                "roe",
+                "grossprofit_margin",
+                "debt_to_assets",
+                "tr_yoy",
+                "netprofit_yoy",
+                "dt_netprofit_yoy",
+            ],
             date_key_role="snapshot_date",
             snapshot_date_key="latest",
             schema_version=1,

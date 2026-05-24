@@ -28,6 +28,15 @@ def test_tushare_adapter_fetches_dataframe_and_projects_fields() -> None:
     assert client.calls[0][0] == "daily"
 
 
+def test_tushare_adapter_normalizes_nan_values_before_json_response() -> None:
+    client = FakeClient(FakeFrame([{"ts_code": "000001.SZ", "pe_ttm": float("nan")}]))
+    provider = TushareProvider(client=client)
+
+    response = provider.fetch("daily_basic", {"ts_code": "000001.SZ"}, fields="ts_code,pe_ttm")
+
+    assert response.items == [["000001.SZ", None]]
+
+
 def test_tushare_adapter_reports_schema_changed_for_missing_requested_field() -> None:
     provider = TushareProvider(client=FakeClient(FakeFrame([{"ts_code": "000001.SZ"}])))
 

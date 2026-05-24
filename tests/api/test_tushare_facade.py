@@ -43,6 +43,42 @@ def test_tushare_facade_keeps_tushare_shape_and_ignores_request_token(tmp_path) 
     assert "token" not in provider.calls[0][1]
 
 
+def test_tushare_facade_supports_fni_financial_endpoint_shapes(tmp_path) -> None:
+    client, _ = make_client(tmp_path)
+
+    response = client.post(
+        "/tushare",
+        json={
+            "api_name": "fina_indicator",
+            "token": "caller-token-must-not-be-used",
+            "params": {"ts_code": "000001.SZ"},
+            "fields": "ts_code,ann_date,end_date,q_roe,grossprofit_margin,tr_yoy,netprofit_yoy",
+        },
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["code"] == 0
+    assert body["data"]["fields"] == [
+        "ts_code",
+        "ann_date",
+        "end_date",
+        "q_roe",
+        "grossprofit_margin",
+        "tr_yoy",
+        "netprofit_yoy",
+    ]
+    assert body["data"]["items"][0] == [
+        "000001.SZ",
+        "20240420",
+        "20240331",
+        3.2,
+        31.0,
+        8.0,
+        9.0,
+    ]
+
+
 def test_tushare_facade_malformed_request_returns_400(tmp_path) -> None:
     client, _ = make_client(tmp_path)
 

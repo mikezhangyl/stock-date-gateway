@@ -11,6 +11,9 @@ from stock_data_gateway.core.errors import GatewayError, GatewayErrorCode
 from stock_data_gateway.core.redaction import sanitize_error_message
 from stock_data_gateway.domain.models import ChipDistributionPoint, DailyPriceBar
 
+_LATEST_WINDOW_ENDPOINTS = {"daily", "daily_basic", "index_daily", "fund_daily"}
+_LATEST_WINDOW_DAYS = 730
+
 
 class TushareMarketDataClient:
     def __init__(
@@ -144,6 +147,8 @@ class TushareMarketDataClient:
         if fields:
             clean_params.setdefault("fields", fields)
         method = getattr(self.pro, endpoint)
+        if _should_fetch_latest_window(endpoint, clean_params):
+            clean_params = _with_latest_window(clean_params)
         return self._call_tushare(endpoint, lambda: method(**clean_params), clean_params)
 
     def _call_tushare(self, endpoint: str, call: Any, params: dict[str, Any]) -> Any:
@@ -242,6 +247,21 @@ def _optional_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _should_fetch_latest_window(endpoint: str, params: dict[str, Any]) -> bool:
+    if endpoint not in _LATEST_WINDOW_ENDPOINTS:
+        return False
+    return not any(params.get(key) for key in ("trade_date", "start_date", "end_date"))
+
+
+def _with_latest_window(params: dict[str, Any]) -> dict[str, Any]:
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=_LATEST_WINDOW_DAYS)
+    expanded = dict(params)
+    expanded["start_date"] = start.strftime("%Y%m%d")
+    expanded["end_date"] = end.strftime("%Y%m%d")
+    return expanded
 
 
 def _resolve_rate_limit_per_minute(explicit_value: Optional[int]) -> int:
