@@ -1,0 +1,1 @@
+"""AkShare provider placeholder."""
