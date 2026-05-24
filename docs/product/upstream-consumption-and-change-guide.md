@@ -169,6 +169,11 @@ uv run market-gateway-fni-acceptance \
 - `outputs/gateway_tushare_primary_20260525_011907`
 - `outputs/gateway_real_enriched_20260525_011918`
 
+FNI 的下一批 normalized REST gateway 需求记录在
+`docs/product/fni-upstream-change-request-2026-05-25.md`。该文件是后续新增
+`/api/v1/market-data/...` 路由时的上游输入，不代表这些 normalized routes
+已经实现。
+
 ## 上游提出更新要求时应包含的信息
 
 上游服务如果需要新增或修改数据能力，请按下面格式提需求。
@@ -352,4 +357,3 @@ Sample expected response:
 
 Operational notes:
 ```
-

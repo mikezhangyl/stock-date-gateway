@@ -15,7 +15,7 @@ The service is intentionally local-first: SQLite cache, fake-provider tests by d
 ```bash
 uv sync --extra dev --extra provider
 uv run pytest
-uv run uvicorn stock_data_gateway.main:app --host 127.0.0.1 --port 8700
+scripts/dev_gateway.sh
 ```
 
 Put provider secrets in `.env.local`; the gateway owns the real Tushare token and
@@ -51,6 +51,10 @@ uv run market-gateway-fni-acceptance \
 See `docs/runbooks/fni-gateway-acceptance.md` for the operational runbook.
 See `docs/product/upstream-consumption-and-change-guide.md` for the upstream
 consumption contract and change request template.
+See `docs/product/fni-upstream-change-request-2026-05-25.md` for the current FNI
+normalized gateway request backlog.
+See `docs/product/endpoint-registry.md` for the current endpoint and field
+registry.
 
 ## Cache Operations
 
