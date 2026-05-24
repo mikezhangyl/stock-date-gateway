@@ -40,6 +40,24 @@ The gateway supports the Tushare endpoints currently exercised by FNI market
 quotes, valuation snapshots, and financial metrics: `daily`, `daily_basic`,
 `stock_basic`, `income`, and `fina_indicator`.
 
+Run the gateway-backed FNI acceptance suite:
+
+```bash
+uv run market-gateway-fni-acceptance \
+  --fni-root /Users/mikezhang/Coding/AI-Learning/fund-narrative-intelligence \
+  --mode all
+```
+
+See `docs/runbooks/fni-gateway-acceptance.md` for the operational runbook.
+
+## Cache Operations
+
+```bash
+uv run market-gateway-cache inspect
+uv run market-gateway-cache audit --provider tushare
+uv run market-gateway-cache clear --provider tushare --endpoint daily --yes
+```
+
 ## Live Validation
 
 Live Tushare checks require both a token and an explicit opt-in:

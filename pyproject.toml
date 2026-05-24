@@ -25,6 +25,8 @@ dev = [
 [project.scripts]
 market-gateway-validate = "stock_data_gateway.cli.validate:main"
 market-gateway-backfill = "stock_data_gateway.cli.backfill:main"
+market-gateway-cache = "stock_data_gateway.cli.cache:main"
+market-gateway-fni-acceptance = "stock_data_gateway.cli.fni_acceptance:main"
 
 [build-system]
 requires = ["hatchling"]
