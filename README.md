@@ -49,6 +49,8 @@ uv run market-gateway-fni-acceptance \
 ```
 
 See `docs/runbooks/fni-gateway-acceptance.md` for the operational runbook.
+See `docs/product/upstream-consumption-and-change-guide.md` for the upstream
+consumption contract and change request template.
 
 ## Cache Operations
 
