@@ -10,6 +10,10 @@
 - 对上游保持 Tushare 官方请求/响应形状，便于已有 Tushare 调用迁移
 - 网关自己持有真实 `TUSHARE_TOKEN`，不会信任或转发调用方传入的 token
 - 使用 SQLite 做 read-through cache，避免上游服务重复打外部数据源
+- 提供 FNI 期望的 normalized REST 路由：`/api/v1/market-data/...`
+- 支持 `force_refresh` 和 refresh 失败时的 stale cache fallback
+- 支持 Tushare facade 里的逗号分隔 `ts_code`，内部拆成逐标的缓存键
+- 提供 EastMoney 行情和 AkShare 板块/涨跌停统计的可选 adapter
 - 支持 fake validation、live provider validation、FNI gateway acceptance
 - 提供 cache inspect/audit/clear 运维命令
 - 已验证 `fund-narrative-intelligence` 可以通过 HTTP 消费本服务，不需要 Python import 或跨项目运行时依赖
@@ -20,6 +24,8 @@
 - `0909805 docs: clarify live provider setup`
 - `bb29a92 feat: support fni tushare gateway calls`
 - `925e974 feat: add fni acceptance and cache ops`
+- `12f0907 docs: add upstream consumption guide`
+- `e4a0488 chore: finalize gateway consumption cleanup`
 
 ## 稳定 HTTP 合约
 
@@ -92,9 +98,59 @@ Content-Type: application/json
 
 上游服务应该只依赖 `code/msg/data/meta`，不要依赖 gateway 内部 Python 类型。
 
-## 当前支持的 Tushare Endpoint
+Normalized REST：
 
-当前真实 provider 是 Tushare。AkShare 和 EastMoney adapter 目前仍是 placeholder。
+```text
+POST /api/v1/market-data/tushare/daily
+Content-Type: application/json
+```
+
+请求形状：
+
+```json
+{
+  "symbols": ["000001.SZ"],
+  "start_date": "2024-01-02",
+  "end_date": "2024-01-02",
+  "include_turnover": true,
+  "force_refresh": false,
+  "allow_stale": true
+}
+```
+
+成功响应形状：
+
+```json
+{
+  "data": {
+    "rows": [
+      {
+        "symbol": "000001.SZ",
+        "trade_date": "2024-01-02",
+        "close": 10.5,
+        "volume": 1000.0,
+        "turnover_rate": 1.2,
+        "source": "tushare"
+      }
+    ]
+  },
+  "meta": {
+    "provider": "tushare",
+    "endpoint": "daily",
+    "cache": {
+      "hit": false,
+      "mode": "upstream"
+    },
+    "generated_at": "2026-05-25T00:00:00+00:00",
+    "row_count": 1,
+    "status": "ok"
+  }
+}
+```
+
+## 当前支持的 Endpoint
+
+当前 read-through cache 的主 provider 是 Tushare。EastMoney 与 AkShare 已有最小真实 adapter；AkShare 是 optional dependency，未安装时 normalized route 返回 degraded empty payload，调用方应按 `meta.status` 判断。
 
 | Endpoint | 当前用途 | 缓存语义 |
 | --- | --- | --- |
@@ -107,6 +163,22 @@ Content-Type: application/json
 | `cyq_chips` | 筹码分布回填 | 按 `ts_code + trade_date`；range 请求先解析交易日再逐日抓取 |
 | `index_daily` | 指数日线，已注册策略 | 按 `ts_code + trade_date` |
 | `fund_daily` | 基金日线，已注册策略 | 按 `ts_code + trade_date` |
+
+Normalized HTTP routes:
+
+| Route | Provider | 状态 |
+| --- | --- | --- |
+| `/api/v1/market-data/tushare/daily` | `tushare` | 已实现，read-through cache |
+| `/api/v1/market-data/tushare/index-daily` | `tushare` | 已实现，read-through cache |
+| `/api/v1/market-data/tushare/fund-daily` | `tushare` | 已实现，read-through cache |
+| `/api/v1/market-data/tushare/stock-basic` | `tushare` | 已实现，read-through cache |
+| `/api/v1/market-data/tushare/trade-cal` | `tushare` | 已实现，read-through cache |
+| `/api/v1/market-data/chips/cyq` | `local_gateway/tushare` | 已实现，按 symbol/date 分组 |
+| `/api/v1/market-data/eastmoney/market-quotes` | `eastmoney` | 已实现，直接调用 public quote API |
+| `/api/v1/market-data/eastmoney/northbound-capital` | `eastmoney` | route 已保留，返回空 rows，等待字段映射 |
+| `/api/v1/market-data/eastmoney/main-capital-flow` | `eastmoney` | route 已保留，返回空 rows，等待字段映射 |
+| `/api/v1/market-data/akshare/sector-concepts` | `akshare` | 已实现，依赖 optional `akshare` 包 |
+| `/api/v1/market-data/akshare/limit-up-down` | `akshare` | 已实现，依赖 optional `akshare` 包 |
 
 字段策略在 `stock_data_gateway/policies/tushare.py` 中集中注册。新增字段时通常需要同步 bump 对应 `schema_version`，避免旧缓存窄字段污染新请求。
 
@@ -141,6 +213,11 @@ uv run market-gateway-cache clear --provider tushare --endpoint daily --yes
 
 `clear` 只清缓存记录，不清审计历史。
 
+普通查询默认命中 cache。Normalized Tushare POST body 可设置：
+
+- `force_refresh: true`：忽略当前记录，尝试抓取新版本
+- `allow_stale: true`：refresh 失败时返回旧 cache，`meta.cache.mode=stale_cache`
+
 ## FNI 当前消费方式
 
 FNI 不应该 import 本项目代码。正确方式是通过环境变量指向本地 HTTP facade：
@@ -166,13 +243,12 @@ uv run market-gateway-fni-acceptance \
 
 最近一次通过的验收输出：
 
-- `outputs/gateway_tushare_primary_20260525_011907`
-- `outputs/gateway_real_enriched_20260525_011918`
+- `outputs/gateway_tushare_primary_20260525_015429`
+- `outputs/gateway_real_enriched_20260525_015443`
 
-FNI 的下一批 normalized REST gateway 需求记录在
-`docs/product/fni-upstream-change-request-2026-05-25.md`。该文件是后续新增
-`/api/v1/market-data/...` 路由时的上游输入，不代表这些 normalized routes
-已经实现。
+FNI 的 normalized REST gateway 需求记录在
+`docs/product/fni-upstream-change-request-2026-05-25.md`。当前版本已经实现该
+文档中非 planned 路由，并为 planned 路由保留稳定空响应入口。
 
 ## 上游提出更新要求时应包含的信息
 

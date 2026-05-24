@@ -33,18 +33,55 @@ class ReadThroughQueryService:
         endpoint: str,
         params: dict[str, Any],
         fields: Optional[str] = None,
+        *,
+        force_refresh: bool = False,
+        allow_stale_on_error: bool = False,
     ) -> QueryResult:
         safe_params = {key: value for key, value in params.items() if key != "token"}
         params_hash = stable_json_hash(
-            {"provider": provider_name, "endpoint": endpoint, "params": safe_params, "fields": fields}
+            {
+                "provider": provider_name,
+                "endpoint": endpoint,
+                "params": safe_params,
+                "fields": fields,
+                "force_refresh": force_refresh,
+                "allow_stale_on_error": allow_stale_on_error,
+            }
         )
         try:
             if endpoint == "cyq_chips":
                 safe_params = self._with_cyq_trade_dates(provider_name, safe_params)
                 params_hash = stable_json_hash(
-                    {"provider": provider_name, "endpoint": endpoint, "params": safe_params, "fields": fields}
+                    {
+                        "provider": provider_name,
+                        "endpoint": endpoint,
+                        "params": safe_params,
+                        "fields": fields,
+                        "force_refresh": force_refresh,
+                        "allow_stale_on_error": allow_stale_on_error,
+                    }
                 )
             policy = self.policies.get(provider_name, endpoint)
+            split_values = _split_comma_values(safe_params.get(policy.instrument_param or ""))
+            if len(split_values) > 1 and policy.instrument_param:
+                results = [
+                    self.query(
+                        provider_name,
+                        endpoint,
+                        {**safe_params, policy.instrument_param: value},
+                        fields,
+                        force_refresh=force_refresh,
+                        allow_stale_on_error=allow_stale_on_error,
+                    )
+                    for value in split_values
+                ]
+                return self._merge_split_results(
+                    provider_name=provider_name,
+                    endpoint=endpoint,
+                    params_hash=params_hash,
+                    requested_fields=policy.requested_fields(fields),
+                    results=results,
+                )
             requirements = policy.build_requirements(safe_params, fields)
             requested_fields = policy.requested_fields(fields)
             existing_records = [self.store.get_current(requirement.key) for requirement in requirements]
@@ -59,19 +96,39 @@ class ReadThroughQueryService:
                 )
 
             fetched_count = 0
+            stale_count = 0
             records: list[CacheRecord] = []
             for requirement, existing in zip(requirements, existing_records):
-                if existing is not None:
+                if existing is not None and not force_refresh:
                     records.append(existing)
                     continue
-                fetched = self._fetch_and_store(provider_name, endpoint, requirement, ",".join(policy.default_fields))
-                fetched_count += 1
-                records.append(fetched)
+                try:
+                    fetched = self._fetch_and_store(
+                        provider_name,
+                        endpoint,
+                        requirement,
+                        ",".join(policy.default_fields),
+                        force=force_refresh,
+                    )
+                    fetched_count += 1
+                    records.append(fetched)
+                except GatewayError:
+                    if existing is not None and allow_stale_on_error:
+                        stale_count += 1
+                        records.append(existing)
+                        continue
+                    raise
 
             rows = [row for record in records if record.payload_kind == "ROWS" for row in record.rows]
             data = ResponseData(fields=requested_fields, items=_project_rows(rows, requested_fields))
-            if fetched_count == 0:
+            if stale_count > 0 and fetched_count == 0:
+                source = "stale_cache"
+            elif stale_count > 0:
+                source = "mixed"
+            elif fetched_count == 0:
                 source = "cache"
+            elif force_refresh and fetched_count == len(requirements):
+                source = "external_refresh"
             elif fetched_count == len(requirements):
                 source = "external"
             else:
@@ -93,6 +150,8 @@ class ReadThroughQueryService:
                     "source": source,
                     "cache_hit": fetched_count == 0,
                     "fetched_external": fetched_count > 0,
+                    "force_refresh": force_refresh,
+                    "stale_count": stale_count,
                     "row_count": len(data.items),
                     "status": "ok",
                 },
@@ -143,11 +202,13 @@ class ReadThroughQueryService:
         endpoint: str,
         requirement: CoverageRequirement,
         fields: Optional[str],
+        *,
+        force: bool = False,
     ) -> CacheRecord:
         lock = self._lock_for(requirement.key.cache_key())
         with lock:
             cached = self.store.get_current(requirement.key)
-            if cached is not None:
+            if cached is not None and not force:
                 return cached
             if not self.store.acquire_fetch_lease(requirement.key):
                 cached_after_lease = self.store.get_current(requirement.key)
@@ -176,6 +237,59 @@ class ReadThroughQueryService:
                 raise
             finally:
                 self.store.release_fetch_lease(requirement.key)
+
+    def _merge_split_results(
+        self,
+        *,
+        provider_name: str,
+        endpoint: str,
+        params_hash: str,
+        requested_fields: list[str],
+        results: list[QueryResult],
+    ) -> QueryResult:
+        ok_results = [result for result in results if result.meta.get("status") == "ok"]
+        if not ok_results:
+            first = results[0] if results else None
+            code = GatewayErrorCode.UNKNOWN_ERROR
+            message = "split query failed"
+            if first is not None:
+                code = GatewayErrorCode(first.meta.get("error_code", GatewayErrorCode.UNKNOWN_ERROR.value))
+                message = str(first.meta.get("error_message") or code.value)
+            return self._error_result(provider_name, endpoint, params_hash, code, message)
+
+        items = [item for result in ok_results for item in result.data.items]
+        sources = [str(result.meta.get("source") or "") for result in ok_results]
+        source = sources[0] if len(set(sources)) == 1 else "mixed"
+        cache_hit = all(bool(result.meta.get("cache_hit")) for result in ok_results)
+        partial_errors = [
+            {
+                "error_code": result.meta.get("error_code"),
+                "error_message": result.meta.get("error_message"),
+            }
+            for result in results
+            if result.meta.get("status") != "ok"
+        ]
+        self.store.write_request_audit(
+            provider=provider_name,
+            endpoint=endpoint,
+            params_hash=params_hash,
+            source=source,
+            cache_hit=cache_hit,
+            row_count=len(items),
+            status="ok",
+        )
+        meta = {
+            "provider": provider_name,
+            "endpoint": endpoint,
+            "source": source,
+            "cache_hit": cache_hit,
+            "fetched_external": any(bool(result.meta.get("fetched_external")) for result in ok_results),
+            "row_count": len(items),
+            "status": "ok",
+        }
+        if partial_errors:
+            meta["partial_errors"] = partial_errors
+        return QueryResult(data=ResponseData(fields=requested_fields, items=items), meta=meta)
 
     def _lock_for(self, key: str) -> threading.Lock:
         with self._locks_guard:
@@ -230,3 +344,9 @@ def _project_rows(rows: list[dict[str, Any]], requested_fields: list[str]) -> li
             raise GatewayError(GatewayErrorCode.SCHEMA_CHANGED, f"Cached payload missing fields: {','.join(missing)}")
         items.append([row[field] for field in requested_fields])
     return items
+
+
+def _split_comma_values(value: Any) -> list[str]:
+    if not isinstance(value, str) or "," not in value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]

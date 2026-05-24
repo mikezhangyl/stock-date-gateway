@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${root}"
+
+if [[ -f ".env.local" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source ".env.local"
+  set +a
+fi
+
 host="${GATEWAY_HOST:-127.0.0.1}"
 port="${GATEWAY_PORT:-8700}"
 

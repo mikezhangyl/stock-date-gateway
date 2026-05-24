@@ -224,7 +224,15 @@ Gateway behavior requested:
 
 ## Acceptance checks
 
-Once implemented, FNI will run:
+FNI can validate the already documented `/tushare` facade with:
+
+```bash
+python scripts/validate_market_data_gateway_contract.py \
+  --base-url http://127.0.0.1:8700 \
+  --mode tushare-facade
+```
+
+For the normalized routes, FNI should run:
 
 ```bash
 MARKET_DATA_GATEWAY_URL=http://127.0.0.1:8700 \

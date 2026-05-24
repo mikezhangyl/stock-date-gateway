@@ -8,6 +8,12 @@ The first stable facade is:
 POST http://127.0.0.1:8700/tushare
 ```
 
+FNI-facing normalized routes are also available under:
+
+```text
+/api/v1/market-data/...
+```
+
 The service is intentionally local-first: SQLite cache, fake-provider tests by default, and live provider validation only when explicitly enabled.
 
 ## Development
@@ -38,7 +44,9 @@ TUSHARE_API_URL=http://127.0.0.1:8700/tushare
 
 The gateway supports the Tushare endpoints currently exercised by FNI market
 quotes, valuation snapshots, and financial metrics: `daily`, `daily_basic`,
-`stock_basic`, `income`, and `fina_indicator`.
+`stock_basic`, `income`, and `fina_indicator`. It also exposes normalized
+Tushare daily/index/fund/calendar/metadata routes, EastMoney market quotes, and
+optional AkShare sector/limit-up-down routes.
 
 Run the gateway-backed FNI acceptance suite:
 
@@ -49,10 +57,12 @@ uv run market-gateway-fni-acceptance \
 ```
 
 See `docs/runbooks/fni-gateway-acceptance.md` for the operational runbook.
+See `docs/runbooks/background-service-and-backfill.md` for LaunchAgent and CYQ
+backfill setup.
 See `docs/product/upstream-consumption-and-change-guide.md` for the upstream
 consumption contract and change request template.
-See `docs/product/fni-upstream-change-request-2026-05-25.md` for the current FNI
-normalized gateway request backlog.
+See `docs/product/fni-upstream-change-request-2026-05-25.md` for the FNI
+normalized gateway request record.
 See `docs/product/endpoint-registry.md` for the current endpoint and field
 registry.
 

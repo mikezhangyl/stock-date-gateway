@@ -8,11 +8,23 @@ from stock_data_gateway.providers.eastmoney.adapter import EastmoneyProvider
 
 
 @pytest.mark.parametrize("provider_cls", [AkshareProvider, EastmoneyProvider])
-def test_placeholder_provider_reports_unavailable(provider_cls) -> None:
+def test_provider_rejects_unknown_endpoint(provider_cls) -> None:
     provider = provider_cls()
 
     with pytest.raises(GatewayError) as raised:
         provider.fetch("anything", {})
 
-    assert raised.value.code == GatewayErrorCode.PROVIDER_UNAVAILABLE
-    assert provider.health_check().ok is False
+    assert raised.value.code == GatewayErrorCode.INVALID_REQUEST
+
+
+def test_eastmoney_health_reports_configured_provider() -> None:
+    assert EastmoneyProvider().health_check().ok is True
+
+
+def test_akshare_health_reports_missing_optional_dependency() -> None:
+    provider = AkshareProvider(module_factory=lambda: (_ for _ in ()).throw(ImportError("missing")))
+
+    health = provider.health_check()
+
+    assert health.ok is False
+    assert health.message == "AkShare package is not available."

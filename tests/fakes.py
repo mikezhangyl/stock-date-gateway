@@ -52,7 +52,7 @@ class FakeProvider(ExternalDataProvider):
             from stock_data_gateway.core.errors import GatewayError, GatewayErrorCode
 
             raise GatewayError(GatewayErrorCode.PROVIDER_UNAVAILABLE, "fake provider unavailable")
-        if endpoint == "daily":
+        if endpoint in {"daily", "index_daily", "fund_daily"}:
             trade_date = params.get("trade_date") or params.get("start_date")
             return ProviderResponse.from_rows(
                 provider=self.provider_name,

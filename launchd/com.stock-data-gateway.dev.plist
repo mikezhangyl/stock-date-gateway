@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.stock-data-gateway.dev</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>/Users/mikezhang/Coding/AI-Learning/stock-data-gateway/scripts/dev_gateway.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/mikezhang/Coding/AI-Learning/stock-data-gateway</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>GATEWAY_HOST</key>
+    <string>127.0.0.1</string>
+    <key>GATEWAY_PORT</key>
+    <string>8700</string>
+    <key>MARKET_DATA_HOME</key>
+    <string>/Users/mikezhang/Coding/AI-Learning/stock-data-gateway/data</string>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/stock-data-gateway.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/stock-data-gateway.err.log</string>
+</dict>
+</plist>
