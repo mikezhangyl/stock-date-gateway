@@ -328,6 +328,12 @@ If the gateway restarts while a job is `accepted` or `running`, the restored job
 status becomes `interrupted`; completed/cancelled/failed job summaries and rows
 remain queryable from SQLite.
 
+If a consumer repeats the same semantic `daily-bars` or `breadth-window` request
+after the previous job ended as `cancelled`, `failed`, or `interrupted`, the
+gateway reactivates that compatible partial job instead of returning the old
+terminal status. Already fetched rows remain readable and are not duplicated;
+the resumed worker skips completed symbols and continues the remaining symbols.
+
 ## Change Request 生命周期
 
 上游 change request 使用文件生命周期管理：

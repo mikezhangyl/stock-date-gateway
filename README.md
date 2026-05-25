@@ -50,6 +50,10 @@ GATEWAY_JOB_MAX_BATCH_SIZE=100
 GATEWAY_JOB_MAX_LOOKBACK_TRADING_DAYS=260
 ```
 
+Retried async requests reuse compatible partial work when the previous semantic
+job ended as `cancelled`, `failed`, or `interrupted`; completed rows remain
+readable and are not duplicated.
+
 ## Fund Narrative Intelligence
 
 `fund-narrative-intelligence` should integrate through the local HTTP facade, not

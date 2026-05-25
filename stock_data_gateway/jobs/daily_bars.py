@@ -17,6 +17,7 @@ from stock_data_gateway.policies.models import stable_json_hash
 
 JOB_ACTIVE_STATUSES = {"accepted", "running"}
 JOB_TERMINAL_STATUSES = {"completed", "completed_with_failures", "failed", "cancelled", "interrupted"}
+JOB_RETRYABLE_STATUSES = {"failed", "cancelled", "interrupted"}
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,7 @@ class DailyBarsJob:
     stale_cache_symbols: int = 0
     last_progress_at: Optional[str] = None
     last_error: Optional[dict[str, Any]] = None
+    run_generation: int = 1
 
     @property
     def requested_symbols(self) -> int:
@@ -257,31 +259,59 @@ class DailyBarsJobManager:
 
     def create_job(self, request: DailyBarsJobRequest) -> DailyBarsJob:
         semantic_hash = stable_json_hash(request.semantic_payload())
+        start_job_id: Optional[str] = None
+        start_generation: Optional[int] = None
         with self._lock:
             existing_id = self._job_id_by_semantic_hash.get(semantic_hash)
             if existing_id is not None:
-                return self._snapshot(self._jobs_by_id[existing_id])
-            if self._active_job_count_locked() >= self.max_active_jobs:
-                raise GatewayError(GatewayErrorCode.QUEUE_FULL, "Daily-bars job queue is full.")
-            now = _utc_now()
-            job_id = f"{request.job_type}-{semantic_hash[:16]}"
-            job = DailyBarsJob(
-                job_id=job_id,
-                semantic_hash=semantic_hash,
-                request=request,
-                status="accepted",
-                created_at=now,
-                started_at=now,
-                updated_at=now,
-                batch_count=_batch_count(request.symbols, request.batch_size),
-            )
-            self._jobs_by_id[job_id] = job
-            self._job_id_by_semantic_hash[semantic_hash] = job_id
-            self._store.save_job(job)
-            accepted_snapshot = self._snapshot(job)
+                job = self._jobs_by_id[existing_id]
+                if job.status not in JOB_RETRYABLE_STATUSES:
+                    return self._snapshot(job)
+                if self._active_job_count_locked() >= self.max_active_jobs:
+                    raise GatewayError(GatewayErrorCode.QUEUE_FULL, "Daily-bars job queue is full.")
+                self._reactivate_retry_locked(job)
+                accepted_snapshot = self._snapshot(job)
+                start_job_id = job.job_id
+                start_generation = job.run_generation
+            else:
+                if self._active_job_count_locked() >= self.max_active_jobs:
+                    raise GatewayError(GatewayErrorCode.QUEUE_FULL, "Daily-bars job queue is full.")
+                now = _utc_now()
+                job_id = f"{request.job_type}-{semantic_hash[:16]}"
+                job = DailyBarsJob(
+                    job_id=job_id,
+                    semantic_hash=semantic_hash,
+                    request=request,
+                    status="accepted",
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    batch_count=_batch_count(request.symbols, request.batch_size),
+                )
+                self._jobs_by_id[job_id] = job
+                self._job_id_by_semantic_hash[semantic_hash] = job_id
+                self._store.save_job(job)
+                accepted_snapshot = self._snapshot(job)
+                start_job_id = job.job_id
+                start_generation = job.run_generation
 
-        self._thread_starter(lambda: self._run_job(job_id))
+        if start_job_id is not None and start_generation is not None:
+            self._thread_starter(lambda: self._run_job(start_job_id, start_generation))
         return accepted_snapshot
+
+    def _reactivate_retry_locked(self, job: DailyBarsJob) -> None:
+        now = _utc_now()
+        job.status = "accepted"
+        job.started_at = now
+        job.updated_at = now
+        job.cancel_requested = False
+        job.current_symbol = None
+        job.current_batch_index = 0
+        job.failed_symbols.clear()
+        job.failures.clear()
+        job.last_error = None
+        job.run_generation += 1
+        self._store.save_job(job)
 
     def create_breadth_window_request(
         self,
@@ -387,24 +417,34 @@ class DailyBarsJobManager:
             self._jobs_by_id[job.job_id] = job
             self._job_id_by_semantic_hash[job.semantic_hash] = job.job_id
 
-    def _run_job(self, job_id: str) -> None:
-        self._mark_running(job_id)
+    def _run_job(self, job_id: str, run_generation: int) -> None:
+        self._mark_running(job_id, run_generation)
         job = self.get_job(job_id)
         if job is None:
             return
+        completed_symbols = set(job.completed_symbols)
         for batch_index, batch in enumerate(_chunks(list(job.request.symbols), job.request.batch_size), start=1):
             for symbol in batch:
-                if self._cancel_requested(job_id):
+                if symbol in completed_symbols:
+                    continue
+                if self._cancel_requested(job_id, run_generation):
                     return
-                self._mark_current_symbol(job_id, symbol, batch_index)
+                self._mark_current_symbol(job_id, symbol, batch_index, run_generation)
                 try:
                     rows, cache_modes = self._fetch_symbol_rows(job.request, symbol)
-                    self._record_symbol_success(job_id, symbol, rows, cache_modes)
+                    self._record_symbol_success(job_id, symbol, rows, cache_modes, run_generation)
+                    completed_symbols.add(symbol)
                 except GatewayError as error:
-                    self._record_symbol_failure(job_id, symbol, error.code.value, error.message)
+                    self._record_symbol_failure(job_id, symbol, error.code.value, error.message, run_generation)
                 except Exception as error:
-                    self._record_symbol_failure(job_id, symbol, GatewayErrorCode.UNKNOWN_ERROR.value, str(error))
-        self._finish(job_id)
+                    self._record_symbol_failure(
+                        job_id,
+                        symbol,
+                        GatewayErrorCode.UNKNOWN_ERROR.value,
+                        str(error),
+                        run_generation,
+                    )
+        self._finish(job_id, run_generation)
 
     def _fetch_symbol_rows(
         self,
@@ -492,19 +532,19 @@ class DailyBarsJobManager:
             return []
         return _open_trade_dates(response.rows(), end_date=end_date)
 
-    def _mark_running(self, job_id: str) -> None:
+    def _mark_running(self, job_id: str, run_generation: int) -> None:
         with self._lock:
             job = self._jobs_by_id.get(job_id)
-            if job is None or job.status == "cancelled":
+            if job is None or job.status == "cancelled" or job.run_generation != run_generation:
                 return
             job.status = "running"
             job.updated_at = _utc_now()
             self._store.save_job(job)
 
-    def _mark_current_symbol(self, job_id: str, symbol: str, batch_index: int) -> None:
+    def _mark_current_symbol(self, job_id: str, symbol: str, batch_index: int, run_generation: int) -> None:
         with self._lock:
             job = self._jobs_by_id.get(job_id)
-            if job is None or job.status == "cancelled":
+            if job is None or job.status == "cancelled" or job.run_generation != run_generation:
                 return
             job.current_symbol = symbol
             job.current_batch_index = batch_index
@@ -517,10 +557,11 @@ class DailyBarsJobManager:
         symbol: str,
         rows: list[dict[str, Any]],
         cache_modes: set[str],
+        run_generation: int,
     ) -> None:
         with self._lock:
             job = self._jobs_by_id.get(job_id)
-            if job is None:
+            if job is None or job.run_generation != run_generation:
                 return
             row_start_index = len(job.rows)
             job.rows.extend(rows)
@@ -534,10 +575,17 @@ class DailyBarsJobManager:
             self._store.append_rows(job_id, row_start_index, rows)
             self._store.save_job(job)
 
-    def _record_symbol_failure(self, job_id: str, symbol: str, error_code: str, message: str) -> None:
+    def _record_symbol_failure(
+        self,
+        job_id: str,
+        symbol: str,
+        error_code: str,
+        message: str,
+        run_generation: int,
+    ) -> None:
         with self._lock:
             job = self._jobs_by_id.get(job_id)
-            if job is None:
+            if job is None or job.run_generation != run_generation:
                 return
             failure = {
                 "symbol": symbol,
@@ -555,10 +603,10 @@ class DailyBarsJobManager:
             job.updated_at = now
             self._store.save_job(job)
 
-    def _finish(self, job_id: str) -> None:
+    def _finish(self, job_id: str, run_generation: int) -> None:
         with self._lock:
             job = self._jobs_by_id.get(job_id)
-            if job is None or job.status == "cancelled":
+            if job is None or job.status == "cancelled" or job.run_generation != run_generation:
                 return
             if len(job.rows) == 0 and job.failures:
                 job.status = "failed"
@@ -570,10 +618,15 @@ class DailyBarsJobManager:
             job.updated_at = _utc_now()
             self._store.save_job(job)
 
-    def _cancel_requested(self, job_id: str) -> bool:
+    def _cancel_requested(self, job_id: str, run_generation: int) -> bool:
         with self._lock:
             job = self._jobs_by_id.get(job_id)
-            return job is None or job.status == "cancelled" or job.cancel_requested
+            return (
+                job is None
+                or job.run_generation != run_generation
+                or job.status == "cancelled"
+                or job.cancel_requested
+            )
 
     def _active_job_count_locked(self) -> int:
         return sum(1 for job in self._jobs_by_id.values() if job.status in JOB_ACTIVE_STATUSES)
@@ -601,6 +654,7 @@ class DailyBarsJobManager:
             stale_cache_symbols=job.stale_cache_symbols,
             last_progress_at=job.last_progress_at,
             last_error=dict(job.last_error) if job.last_error is not None else None,
+            run_generation=job.run_generation,
         )
 
 
@@ -933,6 +987,7 @@ def _job_to_state(job: DailyBarsJob) -> dict[str, Any]:
         "stale_cache_symbols": job.stale_cache_symbols,
         "last_progress_at": job.last_progress_at,
         "last_error": job.last_error,
+        "run_generation": job.run_generation,
     }
 
 
@@ -959,4 +1014,5 @@ def _job_from_state(state: dict[str, Any], rows: list[dict[str, Any]]) -> DailyB
         stale_cache_symbols=int(state.get("stale_cache_symbols") or 0),
         last_progress_at=state.get("last_progress_at"),
         last_error=state.get("last_error"),
+        run_generation=int(state.get("run_generation") or 1),
     )

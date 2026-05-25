@@ -118,6 +118,11 @@ fetched rows, and stops the worker before the next symbol. If the gateway
 restarts while a job is active, the job is recovered as `interrupted` with
 structured status instead of disappearing from the job list.
 
+Repeating the same semantic request after a job ended as `cancelled`, `failed`,
+or `interrupted` reactivates compatible partial work instead of returning the
+old terminal status. Previously fetched rows and cache entries are preserved,
+and the resumed worker skips already completed symbols.
+
 Job queue controls:
 
 ```text

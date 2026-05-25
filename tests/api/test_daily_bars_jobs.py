@@ -219,6 +219,39 @@ def test_cancel_running_job_is_idempotent_and_keeps_partial_rows(tmp_path) -> No
     assert status["rows_available"] == len(rows)
 
 
+def test_cancelled_breadth_window_job_can_be_retried_with_same_semantic_request(tmp_path) -> None:
+    client = make_client(tmp_path, SlowProvider())
+    payload = {
+        "provider": "tushare",
+        "symbols": ["000001.SZ", "600519.SH", "000002.SZ"],
+        "end_date": "2024-01-03",
+        "lookback_trading_days": 2,
+        "include_turnover": False,
+        "batch_size": 1,
+    }
+    response = client.post("/api/v1/market-data/jobs/breadth-window", json=payload)
+    job_id = response.json()["data"]["job_id"]
+    _wait_for_progress(client, job_id, completed_symbols=1)
+    cancel = client.post(f"/api/v1/market-data/jobs/{job_id}/cancel")
+    cancelled = _wait_for_status(client, job_id, terminal_statuses={"cancelled"})
+    partial_rows = client.get(f"/api/v1/market-data/jobs/{job_id}/rows").json()["data"]["rows"]
+
+    retry = client.post("/api/v1/market-data/jobs/breadth-window", json=payload)
+    completed = _wait_for_status(client, job_id)
+    retried_rows = client.get(f"/api/v1/market-data/jobs/{job_id}/rows").json()["data"]["rows"]
+
+    assert cancel.status_code == 200
+    assert cancelled["status"] == "cancelled"
+    assert len(partial_rows) >= 1
+    assert retry.status_code == 202
+    assert retry.json()["data"]["job_id"] == job_id
+    assert retry.json()["data"]["status"] in {"accepted", "running", "completed"}
+    assert completed["status"] == "completed"
+    assert completed["rows_available"] == 6
+    assert len(retried_rows) == 6
+    assert completed["coverage"]["missing_pairs"] == 0
+
+
 def test_completed_job_status_and_rows_survive_manager_restart(tmp_path) -> None:
     db_path = tmp_path / "market_data.sqlite3"
     gateway = make_gateway(db_path)
@@ -265,6 +298,30 @@ def test_inflight_job_recovers_as_interrupted_after_manager_restart(tmp_path) ->
     restarted = DailyBarsJobManager(make_gateway(db_path), max_active_jobs=2, thread_starter=lambda target: None)
 
     assert restarted.get_job(job.job_id).status == "interrupted"
+
+
+def test_interrupted_job_can_be_retried_with_same_semantic_request(tmp_path) -> None:
+    db_path = tmp_path / "market_data.sqlite3"
+    gateway = make_gateway(db_path)
+    manager = DailyBarsJobManager(gateway, max_active_jobs=2, thread_starter=lambda target: None)
+    payload = {
+        "provider": "tushare",
+        "symbols": ["000001.SZ"],
+        "start_date": "2024-01-02",
+        "end_date": "2024-01-02",
+    }
+    request = DailyBarsJobRequest.from_payload(payload, max_symbols=10, max_batch_size=10)
+    interrupted_job = manager.create_job(request)
+    restarted_gateway = make_gateway(db_path)
+    client = TestClient(create_app(restarted_gateway))
+
+    retry = client.post("/api/v1/market-data/jobs/daily-bars", json=payload)
+    completed = _wait_for_status(client, interrupted_job.job_id)
+
+    assert retry.status_code == 202
+    assert retry.json()["data"]["job_id"] == interrupted_job.job_id
+    assert retry.json()["data"]["status"] == "accepted"
+    assert completed["status"] == "completed"
 
 
 def test_breadth_window_job_resolves_trading_window_and_returns_rows(tmp_path) -> None:
