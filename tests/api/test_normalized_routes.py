@@ -185,6 +185,23 @@ def test_normalized_routes_validate_required_inputs(tmp_path) -> None:
     assert missing_stock_codes.status_code == 400
 
 
+def test_normalized_tushare_route_rejects_too_many_symbols(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GATEWAY_MAX_SYMBOLS_PER_REQUEST", "1")
+    client = make_client(tmp_path)
+
+    response = client.post(
+        "/api/v1/market-data/tushare/daily",
+        json={
+            "symbols": ["000001.SZ", "600519.SH"],
+            "start_date": "2024-01-02",
+            "end_date": "2024-01-02",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "maximum symbols" in response.json()["error"]["message"]
+
+
 def test_unstable_provider_route_returns_degraded_empty_payload(tmp_path) -> None:
     client = make_client(tmp_path, {"eastmoney": FailingProvider()})
 

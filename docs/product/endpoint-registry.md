@@ -92,9 +92,14 @@ cache records and fetch a new version. If `allow_stale: true`, a refresh failure
 returns the previous cache record with cache mode `stale_cache`.
 
 EastMoney and AkShare adapters are implemented as optional provider adapters.
-EastMoney quote fetches use the public push2 quote API. AkShare routes require
-installing the provider extra and return a degraded empty payload if the optional
-package is unavailable.
+EastMoney quote fetches use the public push2 quote API. AkShare routes use the
+optional `akshare` package when available and otherwise fall back to EastMoney
+public board/quote data so conformance endpoints do not return empty success
+payloads.
+
+Data-fetching routes are protected by a bounded fetch slot, a per-request symbol
+limit, and a request deadline. The health route stays lightweight and does not
+call upstream providers.
 
 Provider dataframe missing values are normalized to JSON-safe `null` before the
 facade response is serialized.

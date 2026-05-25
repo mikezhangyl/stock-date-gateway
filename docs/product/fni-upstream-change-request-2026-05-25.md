@@ -266,7 +266,78 @@ Expected:
 
 - historical and daily probes pass
 - gateway cache metadata is present
+
+## FNI live validation feedback - 2026-05-25
+
+FNI connected to the local service at `http://127.0.0.1:8700`.
+
+Passed:
+
+- `--mode tushare-facade`: `5/5` passed.
+- Tushare facade rows were returned for `daily`, `index_daily`, `fund_daily`, `stock_basic`, and `trade_cal`.
+- Normalized Tushare routes returned rows for daily bars, index bars, ETF daily data, stock metadata, and trade calendar.
+- Normalized EastMoney market quote returned one row.
+
+Incomplete:
+
+- `GET /api/v1/market-data/akshare/sector-concepts` returned `0` rows.
+- `GET /api/v1/market-data/akshare/limit-up-down` returned `0` rows.
+
+FNI has tightened its conformance check with `minimum_rows: 1` for available
+endpoints, so the current all-surface result is `11/13` passed. Empty responses
+for the two AkShare endpoints are now treated as completeness failures, not
+success.
+
+Current failing checks:
+
+```text
+akshare_sector_concepts -> expected at least 1 row; got 0
+akshare_limit_up_down   -> expected at least 1 row; got 0
+```
+
+Requested gateway-side next action:
+
+- Populate normalized sector concept rows with at least `sector_name`,
+  `pct_change`, and `source`.
+- Populate normalized limit up/down rows with at least `trade_date`,
+  `limit_up_count`, and `limit_down_count`.
+- If upstream is temporarily blocked, return a structured error or explicit
+  stale-cache response instead of an empty success payload.
+
+Reliability finding:
+
+- FNI 100-symbol gateway stress completed with Tushare historical/daily success,
+  but sector completeness failed because sector rows were empty.
+- A 500-symbol gateway stress attempt with batch size `100` did not write any
+  report after more than three minutes and was interrupted from the FNI side.
+- After that interrupted 500-symbol attempt, the gateway still had its uvicorn
+  process alive, but small follow-up checks timed out:
+  - `POST /tushare` with `trade_cal`
+  - `POST /api/v1/market-data/tushare/stock-basic`
+
+Requested gateway-side reliability fix:
+
+- Add request-level timeout and cancellation handling around upstream/cache
+  work so an interrupted client request does not continue blocking the service.
+- Add bounded batching or a request queue for large symbol scans.
+- Add a lightweight health endpoint that does not depend on upstream provider
+  calls and remains responsive when a data fetch is stuck.
+- For large read-through requests, return a structured timeout/accepted status
+  rather than leaving the HTTP request open until the FNI caller times out.
 - failures, if any, are structured
+
+Gateway fix result:
+
+- AkShare sector concepts now falls back to EastMoney public board data when the
+  optional `akshare` package is unavailable.
+- AkShare limit-up/down now returns a normalized one-row count payload even when
+  the optional package is unavailable.
+- Data routes now use a bounded fetch slot, per-request symbol limit, and request
+  deadline. Timeout failures return a structured `REQUEST_TIMEOUT` envelope.
+- `/api/health` remains a lightweight local health check and does not call
+  upstream providers.
+- Latest FNI conformance result: `13/13` passed.
+- Latest FNI 100-symbol gateway stress result: completed with `0` failures.
 
 For facade compatibility:
 

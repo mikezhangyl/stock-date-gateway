@@ -21,10 +21,10 @@ def test_eastmoney_health_reports_configured_provider() -> None:
     assert EastmoneyProvider().health_check().ok is True
 
 
-def test_akshare_health_reports_missing_optional_dependency() -> None:
+def test_akshare_health_reports_eastmoney_fallback_without_importing_dependency() -> None:
     provider = AkshareProvider(module_factory=lambda: (_ for _ in ()).throw(ImportError("missing")))
 
     health = provider.health_check()
 
-    assert health.ok is False
-    assert health.message == "AkShare package is not available."
+    assert health.ok is True
+    assert health.message == "configured_with_eastmoney_fallback"

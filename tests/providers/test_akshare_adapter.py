@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from stock_data_gateway.core.errors import GatewayError, GatewayErrorCode
@@ -18,6 +20,20 @@ class FakeAkshareModule:
     def stock_zt_pool_dtgc_em(self, date: str):
         assert date == "20260522"
         return FakeFrame([{"代码": "000002"}])
+
+
+class FakeHttpResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> "FakeHttpResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")
 
 
 def test_akshare_sector_concepts_maps_dataframe() -> None:
@@ -56,3 +72,40 @@ def test_akshare_limit_up_down_rejects_bad_trade_date() -> None:
         provider.fetch("limit_up_down", {"trade_date": "bad-date"})
 
     assert raised.value.code == GatewayErrorCode.INVALID_REQUEST
+
+
+def test_akshare_sector_concepts_falls_back_to_eastmoney_when_package_missing() -> None:
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse({"data": {"diff": [{"f12": "BK0890", "f14": "MLCC", "f3": 5.64}]}})
+
+    provider = AkshareProvider(
+        module_factory=lambda: (_ for _ in ()).throw(ImportError("missing")),
+        urlopen_fn=fake_urlopen,
+    )
+
+    response = provider.fetch("sector_concepts", {"limit": "1"})
+
+    assert response.rows() == [{"sector_name": "MLCC", "pct_change": 5.64, "source": "eastmoney"}]
+
+
+def test_akshare_limit_up_down_fallback_returns_one_row_when_package_missing() -> None:
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse(
+            {"data": {"diff": [{"f12": "000001", "f3": 10.01}, {"f12": "000002", "f3": -10.02}]}}
+        )
+
+    provider = AkshareProvider(
+        module_factory=lambda: (_ for _ in ()).throw(ImportError("missing")),
+        urlopen_fn=fake_urlopen,
+    )
+
+    response = provider.fetch("limit_up_down", {"trade_date": "2026-05-22"})
+
+    assert response.rows() == [
+        {
+            "trade_date": "2026-05-22",
+            "limit_up_count": 1,
+            "limit_down_count": 1,
+            "source": "eastmoney",
+        }
+    ]

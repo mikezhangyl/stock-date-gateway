@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -19,6 +24,7 @@ from stock_data_gateway.providers.tushare.adapter import TushareProvider
 from stock_data_gateway.providers.tushare.client import TushareMarketDataClient
 
 JSON_BODY = Body(default_factory=dict)
+_FETCH_SEMAPHORE = threading.BoundedSemaphore(int(os.getenv("GATEWAY_FETCH_CONCURRENCY", "4")))
 
 
 def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
@@ -57,7 +63,18 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
         if fields is not None:
             fields = str(fields)
 
-        result = _gateway(app).query("tushare", endpoint, params, fields)
+        if _comma_count(params.get("ts_code")) > _max_symbols_per_request():
+            return _tushare_error(
+                GatewayErrorCode.INVALID_REQUEST,
+                f"ts_code list exceeds maximum symbols per request: {_max_symbols_per_request()}",
+                status_code=400,
+            )
+
+        try:
+            with _fetch_slot():
+                result = _gateway(app).query("tushare", endpoint, params, fields)
+        except GatewayError as error:
+            return _tushare_error(error.code, error.message, status_code=_error_status(error))
         if result.meta.get("status") == "error":
             code = GatewayErrorCode(result.meta.get("error_code", GatewayErrorCode.UNKNOWN_ERROR.value))
             return JSONResponse(
@@ -79,33 +96,46 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
 
     @app.post("/api/v1/market-data/tushare/daily")
     def tushare_daily(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
-        return _normalized_tushare_bars(
-            gateway=_gateway(app),
-            endpoint="daily",
-            payload=payload,
-            include_turnover=bool(payload.get("include_turnover", False)),
-        )
+        try:
+            with _fetch_slot():
+                return _normalized_tushare_bars(
+                    gateway=_gateway(app),
+                    endpoint="daily",
+                    payload=payload,
+                    include_turnover=bool(payload.get("include_turnover", False)),
+                )
+        except GatewayError as error:
+            return _normalized_exception(error)
 
     @app.post("/api/v1/market-data/tushare/index-daily")
     def tushare_index_daily(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
-        return _normalized_tushare_bars(gateway=_gateway(app), endpoint="index_daily", payload=payload)
+        try:
+            with _fetch_slot():
+                return _normalized_tushare_bars(gateway=_gateway(app), endpoint="index_daily", payload=payload)
+        except GatewayError as error:
+            return _normalized_exception(error)
 
     @app.post("/api/v1/market-data/tushare/fund-daily")
     def tushare_fund_daily(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
-        return _normalized_tushare_bars(gateway=_gateway(app), endpoint="fund_daily", payload=payload)
+        try:
+            with _fetch_slot():
+                return _normalized_tushare_bars(gateway=_gateway(app), endpoint="fund_daily", payload=payload)
+        except GatewayError as error:
+            return _normalized_exception(error)
 
     @app.post("/api/v1/market-data/tushare/stock-basic")
     def tushare_stock_basic(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
         try:
             limit = _optional_positive_int(payload.get("limit"), default=5000, maximum=10000)
-            result = _gateway(app).query(
-                "tushare",
-                "stock_basic",
-                {"list_status": str(payload.get("list_status") or "L")},
-                fields="ts_code,symbol,name,industry,list_date,exchange,list_status",
-                force_refresh=bool(payload.get("force_refresh", False)),
-                allow_stale_on_error=bool(payload.get("allow_stale", True)),
-            )
+            with _fetch_slot():
+                result = _gateway(app).query(
+                    "tushare",
+                    "stock_basic",
+                    {"list_status": str(payload.get("list_status") or "L")},
+                    fields="ts_code,symbol,name,industry,list_date,exchange,list_status",
+                    force_refresh=bool(payload.get("force_refresh", False)),
+                    allow_stale_on_error=bool(payload.get("allow_stale", True)),
+                )
             error = _query_error_response(result)
             if error is not None:
                 return error
@@ -120,18 +150,19 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
         try:
             start_date = _compact_date(_required(payload, "start_date"))
             end_date = _compact_date(_required(payload, "end_date"))
-            result = _gateway(app).query(
-                "tushare",
-                "trade_cal",
-                {
-                    "exchange": str(payload.get("exchange") or "SSE"),
-                    "start_date": start_date,
-                    "end_date": end_date,
-                },
-                fields="exchange,cal_date,is_open,pretrade_date",
-                force_refresh=bool(payload.get("force_refresh", False)),
-                allow_stale_on_error=bool(payload.get("allow_stale", True)),
-            )
+            with _fetch_slot():
+                result = _gateway(app).query(
+                    "tushare",
+                    "trade_cal",
+                    {
+                        "exchange": str(payload.get("exchange") or "SSE"),
+                        "start_date": start_date,
+                        "end_date": end_date,
+                    },
+                    fields="exchange,cal_date,is_open,pretrade_date",
+                    force_refresh=bool(payload.get("force_refresh", False)),
+                    allow_stale_on_error=bool(payload.get("allow_stale", True)),
+                )
             error = _query_error_response(result)
             if error is not None:
                 return error
@@ -205,22 +236,25 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
             trade_date = _compact_date(_required(payload, "trade_date"))
             results = []
             cost_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
-            for symbol in symbols:
-                result = _gateway(app).query(
-                    "tushare",
-                    "cyq_chips",
-                    {"ts_code": symbol, "trade_date": trade_date},
-                    fields="ts_code,trade_date,price,percent",
-                    force_refresh=bool(payload.get("force_refresh", False)),
-                    allow_stale_on_error=bool(payload.get("allow_stale", True)),
-                )
-                error = _query_error_response(result)
-                if error is not None:
-                    return error
-                results.append(result)
-                for row in _rows_from_query(result):
-                    key = (str(row.get("ts_code")), _iso_date(row.get("trade_date")))
-                    cost_rows.setdefault(key, []).append({"price": row.get("price"), "percent": row.get("percent")})
+            deadline = _request_deadline()
+            with _fetch_slot():
+                for symbol in symbols:
+                    _check_deadline(deadline)
+                    result = _gateway(app).query(
+                        "tushare",
+                        "cyq_chips",
+                        {"ts_code": symbol, "trade_date": trade_date},
+                        fields="ts_code,trade_date,price,percent",
+                        force_refresh=bool(payload.get("force_refresh", False)),
+                        allow_stale_on_error=bool(payload.get("allow_stale", True)),
+                    )
+                    error = _query_error_response(result)
+                    if error is not None:
+                        return error
+                    results.append(result)
+                    for row in _rows_from_query(result):
+                        key = (str(row.get("ts_code")), _iso_date(row.get("trade_date")))
+                        cost_rows.setdefault(key, []).append({"price": row.get("price"), "percent": row.get("percent")})
             rows = [
                 {
                     "symbol": symbol,
@@ -279,6 +313,7 @@ def _normalized_tushare_bars(
         symbols = _symbols(payload)
         start_date = _compact_date(_required(payload, "start_date"))
         end_date = _compact_date(_required(payload, "end_date"))
+        deadline = _request_deadline()
         force_refresh = bool(payload.get("force_refresh", False))
         allow_stale = bool(payload.get("allow_stale", True))
         results = []
@@ -286,6 +321,7 @@ def _normalized_tushare_bars(
         turnover_by_key: dict[tuple[str, str], Any] = {}
 
         for symbol in symbols:
+            _check_deadline(deadline)
             result = gateway.query(
                 "tushare",
                 endpoint,
@@ -301,6 +337,7 @@ def _normalized_tushare_bars(
             price_rows.extend(_rows_from_query(result))
 
             if include_turnover and endpoint == "daily":
+                _check_deadline(deadline)
                 turnover_result = gateway.query(
                     "tushare",
                     "daily_basic",
@@ -348,7 +385,8 @@ def _provider_success_or_empty(
     params: dict[str, Any],
 ) -> JSONResponse:
     try:
-        response = gateway.providers[provider_name].fetch(endpoint, params, fields=None)
+        with _fetch_slot():
+            response = gateway.providers[provider_name].fetch(endpoint, params, fields=None)
         return _normalized_success(provider_name, endpoint, response.rows(), [], cache_mode="upstream")
     except GatewayError as error:
         payload = _normalized_payload(provider_name, endpoint, [], cache_mode="stale_cache", cache_hit=False)
@@ -435,7 +473,7 @@ def _query_error_response(result: QueryResult) -> Optional[JSONResponse]:
 
 def _normalized_exception(error: Exception) -> JSONResponse:
     if isinstance(error, GatewayError):
-        return _normalized_error(error.code.value, error.message, 502)
+        return _normalized_error(error.code.value, error.message, _error_status(error))
     return _normalized_error(GatewayErrorCode.INVALID_REQUEST.value, str(error), 400)
 
 
@@ -465,6 +503,9 @@ def _symbols(payload: dict[str, Any]) -> list[str]:
     symbols = [str(value).strip() for value in values if str(value).strip()]
     if not symbols:
         raise ValueError("symbols must not be empty")
+    max_symbols = _max_symbols_per_request()
+    if len(symbols) > max_symbols:
+        raise ValueError(f"symbols exceeds maximum symbols per request: {max_symbols}")
     return symbols
 
 
@@ -500,6 +541,52 @@ def _optional_positive_int(value: Any, *, default: int, maximum: int) -> int:
     if parsed < 0:
         raise ValueError("limit must be non-negative")
     return min(parsed, maximum)
+
+
+@contextmanager
+def _fetch_slot() -> Iterator[None]:
+    acquired = _FETCH_SEMAPHORE.acquire(timeout=_queue_timeout_seconds())
+    if not acquired:
+        raise GatewayError(GatewayErrorCode.REQUEST_TIMEOUT, "Gateway fetch queue is busy.")
+    try:
+        yield
+    finally:
+        _FETCH_SEMAPHORE.release()
+
+
+def _request_deadline() -> float:
+    return time.monotonic() + _request_timeout_seconds()
+
+
+def _check_deadline(deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise GatewayError(GatewayErrorCode.REQUEST_TIMEOUT, "Gateway request timed out before completion.")
+
+
+def _request_timeout_seconds() -> float:
+    return max(1.0, float(os.getenv("GATEWAY_REQUEST_TIMEOUT_SECONDS", "9.0")))
+
+
+def _queue_timeout_seconds() -> float:
+    return max(0.1, float(os.getenv("GATEWAY_QUEUE_TIMEOUT_SECONDS", "1.0")))
+
+
+def _max_symbols_per_request() -> int:
+    return max(1, int(os.getenv("GATEWAY_MAX_SYMBOLS_PER_REQUEST", "100")))
+
+
+def _comma_count(value: Any) -> int:
+    if not isinstance(value, str) or not value.strip():
+        return 0
+    return len([item for item in value.split(",") if item.strip()])
+
+
+def _error_status(error: GatewayError) -> int:
+    if error.code == GatewayErrorCode.INVALID_REQUEST:
+        return 400
+    if error.code == GatewayErrorCode.REQUEST_TIMEOUT:
+        return 504
+    return 502
 
 
 def _tushare_error(code: GatewayErrorCode, message: str, status_code: int = 200) -> JSONResponse:

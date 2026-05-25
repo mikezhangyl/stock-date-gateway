@@ -13,7 +13,8 @@
 - 提供 FNI 期望的 normalized REST 路由：`/api/v1/market-data/...`
 - 支持 `force_refresh` 和 refresh 失败时的 stale cache fallback
 - 支持 Tushare facade 里的逗号分隔 `ts_code`，内部拆成逐标的缓存键
-- 提供 EastMoney 行情和 AkShare 板块/涨跌停统计的可选 adapter
+- 提供 EastMoney 行情和 AkShare 板块/涨跌停统计；AkShare 未安装时使用 EastMoney public data fallback
+- 数据路由有 bounded fetch slot、每请求 symbol 上限和 request deadline，健康检查不依赖上游 provider
 - 支持 fake validation、live provider validation、FNI gateway acceptance
 - 提供 cache inspect/audit/clear 运维命令
 - 已验证 `fund-narrative-intelligence` 可以通过 HTTP 消费本服务，不需要 Python import 或跨项目运行时依赖
@@ -150,7 +151,7 @@ Content-Type: application/json
 
 ## 当前支持的 Endpoint
 
-当前 read-through cache 的主 provider 是 Tushare。EastMoney 与 AkShare 已有最小真实 adapter；AkShare 是 optional dependency，未安装时 normalized route 返回 degraded empty payload，调用方应按 `meta.status` 判断。
+当前 read-through cache 的主 provider 是 Tushare。EastMoney 与 AkShare 已有最小真实 adapter；AkShare 是 optional dependency，未安装时 normalized route 会使用 EastMoney public data fallback，避免返回空成功。
 
 | Endpoint | 当前用途 | 缓存语义 |
 | --- | --- | --- |
