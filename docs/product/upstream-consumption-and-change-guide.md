@@ -15,7 +15,7 @@
 - 支持 Tushare facade 里的逗号分隔 `ts_code`，内部拆成逐标的缓存键
 - 提供 EastMoney 行情和 AkShare 板块/涨跌停统计；AkShare 未安装时使用 EastMoney public data fallback
 - 数据路由有 bounded fetch slot、每请求 symbol 上限和 request deadline，健康检查不依赖上游 provider
-- 提供 daily-bars async job API，用于 500-symbol 及更大日线扫描
+- 提供 SQLite-backed async job API，用于 daily-bars、breadth-window、job list、cancel、progress、coverage 和重启后状态查询
 - 支持 fake validation、live provider validation、FNI gateway acceptance
 - 提供 cache inspect/audit/clear 运维命令
 - 已验证 `fund-narrative-intelligence` 可以通过 HTTP 消费本服务，不需要 Python import 或跨项目运行时依赖
@@ -28,6 +28,7 @@
 - `925e974 feat: add fni acceptance and cache ops`
 - `12f0907 docs: add upstream consumption guide`
 - `e4a0488 chore: finalize gateway consumption cleanup`
+- `ca9c055 feat: add daily bars async jobs`
 
 ## 稳定 HTTP 合约
 
@@ -182,7 +183,10 @@ Normalized HTTP routes:
 | `/api/v1/market-data/akshare/sector-concepts` | `akshare` | 已实现，依赖 optional `akshare` 包 |
 | `/api/v1/market-data/akshare/limit-up-down` | `akshare` | 已实现，依赖 optional `akshare` 包 |
 | `/api/v1/market-data/jobs/daily-bars` | `tushare` | 已实现，异步 large scan job |
-| `/api/v1/market-data/jobs/{job_id}` | `tushare` | 已实现，job status |
+| `/api/v1/market-data/jobs/breadth-window` | `tushare` | 已实现，异步 breadth window cache-warming job |
+| `/api/v1/market-data/jobs` | `tushare` | 已实现，job list/filter |
+| `/api/v1/market-data/jobs/{job_id}` | `tushare` | 已实现，job status/progress/coverage |
+| `/api/v1/market-data/jobs/{job_id}/cancel` | `tushare` | 已实现，幂等 cancel，保留 partial rows/cache |
 | `/api/v1/market-data/jobs/{job_id}/rows` | `tushare` | 已实现，job rows 分页读取 |
 
 字段策略在 `stock_data_gateway/policies/tushare.py` 中集中注册。新增字段时通常需要同步 bump 对应 `schema_version`，避免旧缓存窄字段污染新请求。
@@ -255,10 +259,14 @@ FNI 的 normalized REST gateway 初始需求已经归档在
 `docs/product/archive/fni-upstream-change-request-2026-05-25.md`。当前版本已经实现该
 文档中非 planned 路由，并为 planned 路由保留稳定空响应入口。
 
-FNI 当前 active 需求记录在
-`docs/product/fni-large-scan-async-job-change-request-2026-05-25.md`，目标是把
-500-symbol daily scan 从同步大请求升级为 async job 或等价的确定性 partial-result
-模型。
+FNI 的 large scan async job 需求已经归档在
+`docs/product/archive/fni-large-scan-async-job-change-request-2026-05-25.md`。该阶段把
+500-symbol daily scan 从同步大请求升级为 async job，并已被 FNI 验收。
+
+FNI 当前 breadth-scale job ops 需求记录在
+`docs/product/fni-breadth-scale-job-ops-change-request-2026-05-25.md`，目标是把
+MA20/breadth-style cache warming 升级为可 list、cancel、重启后可查、可解释 coverage
+的本地 job operations。
 
 Async daily-bars job:
 
@@ -278,8 +286,25 @@ curl -X POST http://127.0.0.1:8700/api/v1/market-data/jobs/daily-bars \
 Then poll:
 
 ```bash
+curl 'http://127.0.0.1:8700/api/v1/market-data/jobs?job_type=daily-bars'
 curl http://127.0.0.1:8700/api/v1/market-data/jobs/{job_id}
 curl 'http://127.0.0.1:8700/api/v1/market-data/jobs/{job_id}/rows?offset=0&limit=10000'
+curl -X POST http://127.0.0.1:8700/api/v1/market-data/jobs/{job_id}/cancel
+```
+
+Breadth-window job:
+
+```bash
+curl -X POST http://127.0.0.1:8700/api/v1/market-data/jobs/breadth-window \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider": "tushare",
+    "symbols": ["600519.SH", "000001.SZ"],
+    "end_date": "2026-05-22",
+    "lookback_trading_days": 20,
+    "include_turnover": true,
+    "batch_size": 100
+  }'
 ```
 
 Queue and batch controls:
@@ -288,7 +313,20 @@ Queue and batch controls:
 GATEWAY_JOB_QUEUE_LIMIT=2
 GATEWAY_JOB_MAX_SYMBOLS=5000
 GATEWAY_JOB_MAX_BATCH_SIZE=100
+GATEWAY_JOB_MAX_LOOKBACK_TRADING_DAYS=260
 ```
+
+Job status includes:
+
+- `job_type`, `status`, symbol/row counts, `created_at`, `started_at`, `updated_at`
+- `cache_hit_symbols`, `upstream_fetch_symbols`, `stale_cache_symbols`
+- `current_symbol`, `current_batch_index`, `batch_count`, `symbols_per_minute`
+- `last_progress_at`, `last_error`
+- `coverage.expected_pairs`, `coverage.returned_pairs`, `coverage.missing_pairs`, `coverage.missing_reasons`
+
+If the gateway restarts while a job is `accepted` or `running`, the restored job
+status becomes `interrupted`; completed/cancelled/failed job summaries and rows
+remain queryable from SQLite.
 
 ## Change Request 生命周期
 

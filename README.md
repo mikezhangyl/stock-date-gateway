@@ -18,7 +18,10 @@ Large daily-bar scans can use the async job API:
 
 ```text
 POST /api/v1/market-data/jobs/daily-bars
+POST /api/v1/market-data/jobs/breadth-window
+GET  /api/v1/market-data/jobs
 GET  /api/v1/market-data/jobs/{job_id}
+POST /api/v1/market-data/jobs/{job_id}/cancel
 GET  /api/v1/market-data/jobs/{job_id}/rows
 ```
 
@@ -44,6 +47,7 @@ Async scan job controls:
 GATEWAY_JOB_QUEUE_LIMIT=2
 GATEWAY_JOB_MAX_SYMBOLS=5000
 GATEWAY_JOB_MAX_BATCH_SIZE=100
+GATEWAY_JOB_MAX_LOOKBACK_TRADING_DAYS=260
 ```
 
 ## Fund Narrative Intelligence
@@ -80,8 +84,7 @@ See `docs/runbooks/background-service-and-backfill.md` for LaunchAgent and CYQ
 backfill setup.
 See `docs/product/upstream-consumption-and-change-guide.md` for the upstream
 consumption contract and change request template.
-See `docs/product/fni-upstream-change-request-2026-05-25.md` for the FNI
-normalized gateway request record.
+See `docs/product/archive/` for implemented FNI change request records.
 See `docs/product/endpoint-registry.md` for the current endpoint and field
 registry.
 

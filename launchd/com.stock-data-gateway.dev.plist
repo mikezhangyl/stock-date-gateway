@@ -29,6 +29,8 @@
     <string>5000</string>
     <key>GATEWAY_JOB_MAX_BATCH_SIZE</key>
     <string>100</string>
+    <key>GATEWAY_JOB_MAX_LOOKBACK_TRADING_DAYS</key>
+    <string>260</string>
   </dict>
   <key>KeepAlive</key>
   <true/>

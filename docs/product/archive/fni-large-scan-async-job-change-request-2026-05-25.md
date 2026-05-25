@@ -1,6 +1,25 @@
 # FNI Large Scan Async Job Change Request - 2026-05-25
 
-Status: active request
+Archive status: implemented and accepted
+
+Archived on: 2026-05-25
+
+Gateway implementation commit: `ca9c055 feat: add daily bars async jobs`
+
+Acceptance evidence:
+
+- FNI conformance rerun: `outputs/data_capabilities/gateway_conformance_2026-05-25-async-rerun.md`
+- FNI 500-symbol async job acceptance: `outputs/market_data_jobs/2026-05-25-daily-bars-500-ts-code-rerun/job_acceptance.md`
+- FNI 500-symbol cache-path async job acceptance: `outputs/market_data_jobs/2026-05-25-daily-bars-500-ts-code-allow-stale-false-rerun/job_acceptance.md`
+
+Accepted result summary:
+
+- `POST /api/v1/market-data/jobs/daily-bars` returns HTTP `202` quickly.
+- 500-symbol, 5-day, `include_turnover=true` job completed with `2488` rows, `498` symbols with rows, and `0` structured failures.
+- Gateway `/api/health` remained HTTP `200` after acceptance.
+- Legacy synchronous 500-symbol route still produced HTTP `504`; consumers should use the async job route for large daily-bar scans.
+
+Status: archived request
 
 Upstream: `fund-narrative-intelligence` (`FNI`)
 

@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -34,8 +34,15 @@ JSON_BODY = Body(default_factory=dict)
 _FETCH_SEMAPHORE = threading.BoundedSemaphore(int(os.getenv("GATEWAY_FETCH_CONCURRENCY", "4")))
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> Iterator[None]:
+    yield
+    if app.state.daily_bars_jobs is not None:
+        app.state.daily_bars_jobs.close()
+
+
 def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
-    app = FastAPI(title="Local Market Data Gateway")
+    app = FastAPI(title="Local Market Data Gateway", lifespan=_lifespan)
     app.state.gateway = gateway
     app.state.daily_bars_jobs = None
 
@@ -288,12 +295,59 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
             return JSONResponse(
                 {
                     "data": {"job_id": job.job_id, "status": job.status},
-                    "meta": _job_meta(job_id=job.job_id, status=job.status, cache_mode=job.cache_mode()),
+                    "meta": _job_meta(job),
                 },
                 status_code=202,
             )
         except GatewayError as error:
             return _normalized_exception(error)
+
+    @app.post("/api/v1/market-data/jobs/breadth-window")
+    def create_breadth_window_job(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            request = _daily_bars_jobs(app).create_breadth_window_request(
+                payload,
+                max_symbols=job_max_symbols(),
+                max_batch_size=job_max_batch_size(),
+            )
+            job = _daily_bars_jobs(app).create_job(request)
+            return JSONResponse(
+                {
+                    "data": {"job_id": job.job_id, "status": job.status},
+                    "meta": _job_meta(job),
+                },
+                status_code=202,
+            )
+        except GatewayError as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/jobs")
+    def list_market_data_jobs(
+        provider: str = Query(default=""),
+        endpoint: str = Query(default=""),
+        job_type: str = Query(default=""),
+        status: str = Query(default=""),
+        created_after: str = Query(default=""),
+        updated_after: str = Query(default=""),
+    ) -> JSONResponse:
+        jobs = _daily_bars_jobs(app).list_jobs(
+            provider=provider or None,
+            endpoint=endpoint or None,
+            job_type=job_type or None,
+            status=status or None,
+            created_after=created_after or None,
+            updated_after=updated_after or None,
+        )
+        return JSONResponse(
+            {
+                "data": {"jobs": [job.status_payload() for job in jobs]},
+                "meta": {
+                    "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "row_count": len(jobs),
+                    "status": "ok",
+                },
+            }
+        )
 
     @app.get("/api/v1/market-data/jobs/{job_id}")
     def get_daily_bars_job(job_id: str) -> JSONResponse:
@@ -303,9 +357,16 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
         return JSONResponse(
             {
                 "data": job.status_payload(),
-                "meta": _job_meta(job_id=job.job_id, status=job.status, cache_mode=job.cache_mode()),
+                "meta": _job_meta(job),
             }
         )
+
+    @app.post("/api/v1/market-data/jobs/{job_id}/cancel")
+    def cancel_daily_bars_job(job_id: str) -> JSONResponse:
+        job = _daily_bars_jobs(app).cancel_job(job_id)
+        if job is None:
+            return _normalized_error("JOB_NOT_FOUND", f"Unknown job_id: {job_id}", 404)
+        return JSONResponse({"data": job.status_payload(), "meta": _job_meta(job)})
 
     @app.get("/api/v1/market-data/jobs/{job_id}/rows")
     def get_daily_bars_job_rows(
@@ -327,13 +388,14 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
             {
                 "data": {"rows": rows},
                 "meta": {
-                    **_job_meta(job_id=job.job_id, status=job.status, cache_mode=job.cache_mode()),
+                    **_job_meta(job),
                     "pagination": {
                         "offset": offset,
                         "limit": resolved_limit,
                         "returned": len(rows),
                         "total": len(job.rows),
                     },
+                    "coverage": job.coverage_payload(),
                 },
             }
         )
@@ -521,13 +583,14 @@ def _normalized_payload(
     }
 
 
-def _job_meta(*, job_id: str, status: str, cache_mode: str) -> dict[str, Any]:
+def _job_meta(job: Any) -> dict[str, Any]:
     return {
-        "job_id": job_id,
-        "status": status,
+        "job_id": job.job_id,
+        "job_type": job.request.job_type,
+        "status": job.status,
         "provider": "tushare",
         "endpoint": "daily",
-        "cache": {"mode": cache_mode},
+        "cache": {"mode": job.cache_mode()},
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
 

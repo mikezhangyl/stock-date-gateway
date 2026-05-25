@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from stock_data_gateway.domain.provider import ProviderResponse
@@ -119,6 +120,22 @@ class FakeProvider(ExternalDataProvider):
                 ],
             )
         if endpoint == "trade_cal":
+            if params.get("start_date") and params.get("end_date"):
+                start = datetime.strptime(str(params["start_date"]), "%Y%m%d")
+                end = datetime.strptime(str(params["end_date"]), "%Y%m%d")
+                rows = []
+                current = start
+                while current <= end:
+                    rows.append(
+                        {
+                            "exchange": params.get("exchange", "SSE"),
+                            "cal_date": current.strftime("%Y%m%d"),
+                            "is_open": "1",
+                            "pretrade_date": (current - timedelta(days=1)).strftime("%Y%m%d"),
+                        }
+                    )
+                    current += timedelta(days=1)
+                return ProviderResponse.from_rows(provider=self.provider_name, endpoint=endpoint, rows=rows)
             return ProviderResponse.from_rows(
                 provider=self.provider_name,
                 endpoint=endpoint,

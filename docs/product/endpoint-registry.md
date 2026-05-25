@@ -22,7 +22,10 @@ or cache semantic changes.
 | `/api/v1/market-data/akshare/sector-concepts` | `GET` | Normalized concept/sector rows from AkShare when the optional package is installed. |
 | `/api/v1/market-data/akshare/limit-up-down` | `GET` | Normalized limit-up/limit-down counts from AkShare when available. |
 | `/api/v1/market-data/jobs/daily-bars` | `POST` | Creates an async Tushare daily-bars scan job. |
-| `/api/v1/market-data/jobs/{job_id}` | `GET` | Returns async job status, counts, cache mode, and structured failures. |
+| `/api/v1/market-data/jobs/breadth-window` | `POST` | Creates an async Tushare breadth-window cache-warming job. |
+| `/api/v1/market-data/jobs` | `GET` | Lists async jobs with status, type, provider, endpoint, and timestamp filters. |
+| `/api/v1/market-data/jobs/{job_id}` | `GET` | Returns async job status, progress, coverage, cache mode, and structured failures. |
+| `/api/v1/market-data/jobs/{job_id}/cancel` | `POST` | Requests cancellation for an active async job without clearing cached rows. |
 | `/api/v1/market-data/jobs/{job_id}/rows` | `GET` | Returns available normalized daily-bar rows for a job. |
 
 `POST /tushare` accepts:
@@ -104,10 +107,16 @@ Data-fetching routes are protected by a bounded fetch slot, a per-request symbol
 limit, and a request deadline. The health route stays lightweight and does not
 call upstream providers.
 
-Large daily-bar scans should use the async job routes. Job creation is
-idempotent for the same semantic request and returns quickly with `202 Accepted`.
-The in-process worker uses bounded internal batches and stores rows/failures for
-later polling.
+Large daily-bar and breadth-window scans should use the async job routes. Job
+creation is idempotent for the same semantic request and returns quickly with
+`202 Accepted`. The in-process worker uses bounded internal batches and persists
+job status, rows, progress, failures, and coverage metadata to SQLite for later
+polling after process restart.
+
+Active jobs can be cancelled. Cancellation is idempotent, preserves already
+fetched rows, and stops the worker before the next symbol. If the gateway
+restarts while a job is active, the job is recovered as `interrupted` with
+structured status instead of disappearing from the job list.
 
 Job queue controls:
 
@@ -115,6 +124,7 @@ Job queue controls:
 GATEWAY_JOB_QUEUE_LIMIT=2
 GATEWAY_JOB_MAX_SYMBOLS=5000
 GATEWAY_JOB_MAX_BATCH_SIZE=100
+GATEWAY_JOB_MAX_LOOKBACK_TRADING_DAYS=260
 ```
 
 Provider dataframe missing values are normalized to JSON-safe `null` before the
