@@ -21,6 +21,9 @@ or cache semantic changes.
 | `/api/v1/market-data/eastmoney/main-capital-flow` | `GET` | Planned-compatible empty endpoint until field mapping is finalized. |
 | `/api/v1/market-data/akshare/sector-concepts` | `GET` | Normalized concept/sector rows from AkShare when the optional package is installed. |
 | `/api/v1/market-data/akshare/limit-up-down` | `GET` | Normalized limit-up/limit-down counts from AkShare when available. |
+| `/api/v1/market-data/jobs/daily-bars` | `POST` | Creates an async Tushare daily-bars scan job. |
+| `/api/v1/market-data/jobs/{job_id}` | `GET` | Returns async job status, counts, cache mode, and structured failures. |
+| `/api/v1/market-data/jobs/{job_id}/rows` | `GET` | Returns available normalized daily-bar rows for a job. |
 
 `POST /tushare` accepts:
 
@@ -100,6 +103,19 @@ payloads.
 Data-fetching routes are protected by a bounded fetch slot, a per-request symbol
 limit, and a request deadline. The health route stays lightweight and does not
 call upstream providers.
+
+Large daily-bar scans should use the async job routes. Job creation is
+idempotent for the same semantic request and returns quickly with `202 Accepted`.
+The in-process worker uses bounded internal batches and stores rows/failures for
+later polling.
+
+Job queue controls:
+
+```text
+GATEWAY_JOB_QUEUE_LIMIT=2
+GATEWAY_JOB_MAX_SYMBOLS=5000
+GATEWAY_JOB_MAX_BATCH_SIZE=100
+```
 
 Provider dataframe missing values are normalized to JSON-safe `null` before the
 facade response is serialized.

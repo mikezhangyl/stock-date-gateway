@@ -1,5 +1,24 @@
 # FNI Upstream Change Request - 2026-05-25
 
+Archive status: implemented and superseded.
+
+Archived on: 2026-05-25
+
+Implemented by: `64fa1e8 fix: harden fni gateway validation`
+
+Superseded by:
+
+- `docs/product/fni-large-scan-async-job-change-request-2026-05-25.md`
+
+Final FNI validation summary:
+
+- Gateway health: passed.
+- FNI gateway conformance: `13/13` passed.
+- Gateway-backed sector scan: completed.
+- Gateway-backed 100-symbol stress: completed with `0` failures.
+- 500-symbol daily scan still returns gateway-generated `504` responses under
+  synchronous large-batch load; this is tracked in the superseding request.
+
 ## Title
 
 Support `fund-narrative-intelligence` V0 gateway-first market-data validation.
@@ -338,6 +357,66 @@ Gateway fix result:
   upstream providers.
 - Latest FNI conformance result: `13/13` passed.
 - Latest FNI 100-symbol gateway stress result: completed with `0` failures.
+
+FNI post-fix verification detail:
+
+- `/api/health`: `200`, with `akshare` reported as
+  `configured_with_eastmoney_fallback`.
+- `python scripts/validate_market_data_gateway_contract.py --base-url http://127.0.0.1:8700 --mode all`:
+  `13/13` passed.
+- Gateway-backed sector scan: completed with `100` sector rows and `2` ETF rows.
+- Gateway-backed 100-symbol stress: completed with `0` failures, `6` requests,
+  and `696` rows.
+
+Remaining 500-symbol finding:
+
+- FNI consolidated 500-symbol stress with batch size `100` exceeded the outer
+  `240s` guard and did not write a stress report. This path may be slowed by
+  FNI direct-provider fallback after gateway `504` responses.
+- Gateway-strict 500-symbol stress, using only the normalized local gateway and
+  no direct-provider fallback, did complete. Result:
+  - status: `completed_with_failures`
+  - requests: `12`
+  - rows: `696`
+  - failures: `8`
+  - failed batches: `4` historical daily requests and `4` incremental daily
+    requests returned HTTP `504`
+  - sector probe passed with `102` rows
+- Follow-up `/api/health`, `/tushare` `trade_cal`, and normalized `stock-basic`
+  checks passed after the strict 500-symbol run, so the service recovered better
+  than before. The remaining gap is 500-symbol daily scan throughput/timeout,
+  not basic service liveness.
+
+Suggested next reliability target:
+
+- Make `POST /api/v1/market-data/tushare/daily` handle 500 symbols over a
+  5-trading-day window with batch size `100` without HTTP `504`, or return a
+  structured accepted/partial result that FNI can treat deterministically.
+- Consider internal sub-batching below the public request symbol cap, cache
+  warming, or async job handoff for large daily scans.
+
+FNI clean rerun after new gateway service start:
+
+- `/api/health`: `200`.
+- `--mode all` conformance: `13/13` passed.
+- Gateway-backed sector scan: completed with `100` sector rows and `2` ETF rows.
+- Gateway-backed 100-symbol stress: completed with `0` failures, `6` requests,
+  and `696` rows.
+- Gateway-strict 500-symbol stress completed in-process and did not block
+  health checks afterward, but still returned `504` failures:
+  - status: `completed_with_failures`
+  - requests: `12`
+  - rows: `995`
+  - failures: `5`
+  - historical: `5` requests, `495` rows, `4` HTTP `504` failures
+  - daily: `5` requests, `398` rows, `1` HTTP `504` failure
+  - sector: `2` requests, `102` rows, `0` failures
+
+Updated interpretation:
+
+- 100-symbol gateway validation is now a passing V0 baseline.
+- 500-symbol validation is improved but not yet passing; the remaining issue is
+  normalized Tushare daily throughput/timeout for larger scans.
 
 For facade compatibility:
 

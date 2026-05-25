@@ -14,6 +14,14 @@ FNI-facing normalized routes are also available under:
 /api/v1/market-data/...
 ```
 
+Large daily-bar scans can use the async job API:
+
+```text
+POST /api/v1/market-data/jobs/daily-bars
+GET  /api/v1/market-data/jobs/{job_id}
+GET  /api/v1/market-data/jobs/{job_id}/rows
+```
+
 The service is intentionally local-first: SQLite cache, fake-provider tests by default, and live provider validation only when explicitly enabled.
 
 ## Development
@@ -29,6 +37,14 @@ does not trust or forward caller-supplied tokens.
 
 Tushare pacing is configurable with `TUSHARE_RATE_LIMIT_PER_MINUTE`. The default
 is `500`, matching the 5000-point Tushare tier.
+
+Async scan job controls:
+
+```text
+GATEWAY_JOB_QUEUE_LIMIT=2
+GATEWAY_JOB_MAX_SYMBOLS=5000
+GATEWAY_JOB_MAX_BATCH_SIZE=100
+```
 
 ## Fund Narrative Intelligence
 

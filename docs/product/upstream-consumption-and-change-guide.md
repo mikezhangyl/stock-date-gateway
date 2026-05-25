@@ -15,6 +15,7 @@
 - 支持 Tushare facade 里的逗号分隔 `ts_code`，内部拆成逐标的缓存键
 - 提供 EastMoney 行情和 AkShare 板块/涨跌停统计；AkShare 未安装时使用 EastMoney public data fallback
 - 数据路由有 bounded fetch slot、每请求 symbol 上限和 request deadline，健康检查不依赖上游 provider
+- 提供 daily-bars async job API，用于 500-symbol 及更大日线扫描
 - 支持 fake validation、live provider validation、FNI gateway acceptance
 - 提供 cache inspect/audit/clear 运维命令
 - 已验证 `fund-narrative-intelligence` 可以通过 HTTP 消费本服务，不需要 Python import 或跨项目运行时依赖
@@ -180,6 +181,9 @@ Normalized HTTP routes:
 | `/api/v1/market-data/eastmoney/main-capital-flow` | `eastmoney` | route 已保留，返回空 rows，等待字段映射 |
 | `/api/v1/market-data/akshare/sector-concepts` | `akshare` | 已实现，依赖 optional `akshare` 包 |
 | `/api/v1/market-data/akshare/limit-up-down` | `akshare` | 已实现，依赖 optional `akshare` 包 |
+| `/api/v1/market-data/jobs/daily-bars` | `tushare` | 已实现，异步 large scan job |
+| `/api/v1/market-data/jobs/{job_id}` | `tushare` | 已实现，job status |
+| `/api/v1/market-data/jobs/{job_id}/rows` | `tushare` | 已实现，job rows 分页读取 |
 
 字段策略在 `stock_data_gateway/policies/tushare.py` 中集中注册。新增字段时通常需要同步 bump 对应 `schema_version`，避免旧缓存窄字段污染新请求。
 
@@ -247,9 +251,54 @@ uv run market-gateway-fni-acceptance \
 - `outputs/gateway_tushare_primary_20260525_015429`
 - `outputs/gateway_real_enriched_20260525_015443`
 
-FNI 的 normalized REST gateway 需求记录在
-`docs/product/fni-upstream-change-request-2026-05-25.md`。当前版本已经实现该
+FNI 的 normalized REST gateway 初始需求已经归档在
+`docs/product/archive/fni-upstream-change-request-2026-05-25.md`。当前版本已经实现该
 文档中非 planned 路由，并为 planned 路由保留稳定空响应入口。
+
+FNI 当前 active 需求记录在
+`docs/product/fni-large-scan-async-job-change-request-2026-05-25.md`，目标是把
+500-symbol daily scan 从同步大请求升级为 async job 或等价的确定性 partial-result
+模型。
+
+Async daily-bars job:
+
+```bash
+curl -X POST http://127.0.0.1:8700/api/v1/market-data/jobs/daily-bars \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider": "tushare",
+    "symbols": ["600519.SH", "000001.SZ"],
+    "start_date": "2026-05-18",
+    "end_date": "2026-05-22",
+    "include_turnover": true,
+    "batch_size": 100
+  }'
+```
+
+Then poll:
+
+```bash
+curl http://127.0.0.1:8700/api/v1/market-data/jobs/{job_id}
+curl 'http://127.0.0.1:8700/api/v1/market-data/jobs/{job_id}/rows?offset=0&limit=10000'
+```
+
+Queue and batch controls:
+
+```text
+GATEWAY_JOB_QUEUE_LIMIT=2
+GATEWAY_JOB_MAX_SYMBOLS=5000
+GATEWAY_JOB_MAX_BATCH_SIZE=100
+```
+
+## Change Request 生命周期
+
+上游 change request 使用文件生命周期管理：
+
+- active request 放在 `docs/product/` 下。
+- 已实现并通过验收的 request 移动到 `docs/product/archive/`。
+- 归档文件顶部必须写明 `Archive status`、归档日期、实现提交或验收依据。
+- 新需求不要继续追加到已归档文件；新建一个 active request 文件。
+- 如果新需求继承旧需求的后续问题，在新文件里用 `Supersedes` 指向旧归档文件。
 
 ## 上游提出更新要求时应包含的信息
 

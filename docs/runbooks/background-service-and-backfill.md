@@ -35,6 +35,14 @@ TUSHARE_RATE_LIMIT_PER_MINUTE=500
 The default is `500` calls per minute. Override it in `.env.local` or in the
 LaunchAgent environment if the token tier changes.
 
+Async daily-bars job controls:
+
+```bash
+GATEWAY_JOB_QUEUE_LIMIT=2
+GATEWAY_JOB_MAX_SYMBOLS=5000
+GATEWAY_JOB_MAX_BATCH_SIZE=100
+```
+
 Stop it:
 
 ```bash

@@ -17,6 +17,13 @@ from stock_data_gateway.cache.sqlite_store import SQLiteCacheStore
 from stock_data_gateway.core.config import Settings
 from stock_data_gateway.core.errors import GatewayError, GatewayErrorCode, tushare_error_code
 from stock_data_gateway.domain.provider import QueryResult
+from stock_data_gateway.jobs.daily_bars import (
+    DailyBarsJobManager,
+    DailyBarsJobRequest,
+    job_max_batch_size,
+    job_max_symbols,
+    job_queue_limit,
+)
 from stock_data_gateway.policies.registry import create_default_policy_registry
 from stock_data_gateway.providers.akshare.adapter import AkshareProvider
 from stock_data_gateway.providers.eastmoney.adapter import EastmoneyProvider
@@ -30,6 +37,7 @@ _FETCH_SEMAPHORE = threading.BoundedSemaphore(int(os.getenv("GATEWAY_FETCH_CONCU
 def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
     app = FastAPI(title="Local Market Data Gateway")
     app.state.gateway = gateway
+    app.state.daily_bars_jobs = None
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -268,6 +276,68 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
         except (ValueError, GatewayError) as error:
             return _normalized_exception(error)
 
+    @app.post("/api/v1/market-data/jobs/daily-bars")
+    def create_daily_bars_job(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            request = DailyBarsJobRequest.from_payload(
+                payload,
+                max_symbols=job_max_symbols(),
+                max_batch_size=job_max_batch_size(),
+            )
+            job = _daily_bars_jobs(app).create_job(request)
+            return JSONResponse(
+                {
+                    "data": {"job_id": job.job_id, "status": job.status},
+                    "meta": _job_meta(job_id=job.job_id, status=job.status, cache_mode=job.cache_mode()),
+                },
+                status_code=202,
+            )
+        except GatewayError as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/jobs/{job_id}")
+    def get_daily_bars_job(job_id: str) -> JSONResponse:
+        job = _daily_bars_jobs(app).get_job(job_id)
+        if job is None:
+            return _normalized_error("JOB_NOT_FOUND", f"Unknown job_id: {job_id}", 404)
+        return JSONResponse(
+            {
+                "data": job.status_payload(),
+                "meta": _job_meta(job_id=job.job_id, status=job.status, cache_mode=job.cache_mode()),
+            }
+        )
+
+    @app.get("/api/v1/market-data/jobs/{job_id}/rows")
+    def get_daily_bars_job_rows(
+        job_id: str,
+        offset: int = Query(default=0),
+        limit: int = Query(default=10000),
+    ) -> JSONResponse:
+        if offset < 0:
+            return _normalized_error(GatewayErrorCode.INVALID_REQUEST.value, "offset must be non-negative", 400)
+        try:
+            resolved_limit = _optional_positive_int(limit, default=10000, maximum=50000)
+        except ValueError as error:
+            return _normalized_exception(error)
+        result = _daily_bars_jobs(app).rows(job_id, offset=offset, limit=resolved_limit)
+        if result is None:
+            return _normalized_error("JOB_NOT_FOUND", f"Unknown job_id: {job_id}", 404)
+        job, rows = result
+        return JSONResponse(
+            {
+                "data": {"rows": rows},
+                "meta": {
+                    **_job_meta(job_id=job.job_id, status=job.status, cache_mode=job.cache_mode()),
+                    "pagination": {
+                        "offset": offset,
+                        "limit": resolved_limit,
+                        "returned": len(rows),
+                        "total": len(job.rows),
+                    },
+                },
+            }
+        )
+
     return app
 
 
@@ -275,6 +345,15 @@ def _gateway(app: FastAPI) -> ReadThroughQueryService:
     if app.state.gateway is None:
         app.state.gateway = create_default_gateway()
     return app.state.gateway
+
+
+def _daily_bars_jobs(app: FastAPI) -> DailyBarsJobManager:
+    if app.state.daily_bars_jobs is None:
+        app.state.daily_bars_jobs = DailyBarsJobManager(
+            _gateway(app),
+            max_active_jobs=job_queue_limit(),
+        )
+    return app.state.daily_bars_jobs
 
 
 def create_default_gateway(settings: Optional[Settings] = None) -> ReadThroughQueryService:
@@ -442,6 +521,17 @@ def _normalized_payload(
     }
 
 
+def _job_meta(*, job_id: str, status: str, cache_mode: str) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "status": status,
+        "provider": "tushare",
+        "endpoint": "daily",
+        "cache": {"mode": cache_mode},
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
+
+
 def _cache_mode(results: list[QueryResult]) -> str:
     if not results:
         return "upstream"
@@ -584,6 +674,8 @@ def _comma_count(value: Any) -> int:
 def _error_status(error: GatewayError) -> int:
     if error.code == GatewayErrorCode.INVALID_REQUEST:
         return 400
+    if error.code == GatewayErrorCode.QUEUE_FULL:
+        return 429
     if error.code == GatewayErrorCode.REQUEST_TIMEOUT:
         return 504
     return 502

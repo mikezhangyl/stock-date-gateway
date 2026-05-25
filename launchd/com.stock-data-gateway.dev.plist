@@ -23,6 +23,12 @@
     <string>/Users/mikezhang/Coding/AI-Learning/stock-data-gateway/data</string>
     <key>TUSHARE_RATE_LIMIT_PER_MINUTE</key>
     <string>500</string>
+    <key>GATEWAY_JOB_QUEUE_LIMIT</key>
+    <string>2</string>
+    <key>GATEWAY_JOB_MAX_SYMBOLS</key>
+    <string>5000</string>
+    <key>GATEWAY_JOB_MAX_BATCH_SIZE</key>
+    <string>100</string>
   </dict>
   <key>KeepAlive</key>
   <true/>
