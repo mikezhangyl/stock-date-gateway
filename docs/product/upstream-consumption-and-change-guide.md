@@ -263,8 +263,8 @@ FNI 的 large scan async job 需求已经归档在
 `docs/product/archive/fni-large-scan-async-job-change-request-2026-05-25.md`。该阶段把
 500-symbol daily scan 从同步大请求升级为 async job，并已被 FNI 验收。
 
-FNI 当前 breadth-scale job ops 需求记录在
-`docs/product/fni-breadth-scale-job-ops-change-request-2026-05-25.md`，目标是把
+FNI 的 breadth-scale job ops 需求已经归档在
+`docs/product/archive/fni-breadth-scale-job-ops-change-request-2026-05-25.md`。该阶段把
 MA20/breadth-style cache warming 升级为可 list、cancel、重启后可查、可解释 coverage
 的本地 job operations。
 

@@ -1,6 +1,35 @@
 # FNI Breadth Scale Job Ops Change Request - 2026-05-25
 
-Status: active request
+Archive status: implemented and accepted
+
+Archived on: 2026-05-25
+
+Gateway implementation commit: `7812d58 feat: add breadth-scale job operations`
+
+Acceptance evidence:
+
+- Gateway unit/integration suite: `uv run pytest` -> `88 passed`, coverage `81.34%`
+- Gateway lint: `uv run ruff check .` -> passed
+- LaunchAgent plist validation: `plutil -lint launchd/com.stock-data-gateway.dev.plist` -> OK
+- Runtime breadth-window 500-symbol/20-trading-day job:
+  - create HTTP status `202`
+  - create latency `0.468s`
+  - job id `breadth-window-ef97409a50b8feec`
+  - `GET /api/v1/market-data/jobs` listed the running job
+  - `/api/health` stayed HTTP `200`
+  - cancel returned `cancelled`
+  - partial rows remained readable
+- Runtime completed breadth-window smoke job:
+  - job id `breadth-window-d5cb7f240be1c85f`
+  - requested symbols `2`
+  - completed symbols `2`
+  - rows `4`
+  - coverage `4/4`, missing pairs `0`
+  - completed status and rows survived LaunchAgent restart
+- FNI gateway conformance rerun: `13/13` passed
+- FNI 100-symbol stress rerun: `completed`
+
+Status: archived request
 
 Upstream: `fund-narrative-intelligence` (`FNI`)
 

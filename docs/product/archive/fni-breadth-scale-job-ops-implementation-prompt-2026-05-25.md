@@ -1,5 +1,9 @@
 # Prompt: Implement FNI Breadth-Scale Gateway Job Operations
 
+Archive status: executed by `7812d58 feat: add breadth-scale job operations`
+
+Archived on: 2026-05-25
+
 你现在在项目：
 
 ```text
@@ -14,7 +18,7 @@
 
 ```text
 docs/product/upstream-consumption-and-change-guide.md
-docs/product/fni-breadth-scale-job-ops-change-request-2026-05-25.md
+docs/product/archive/fni-breadth-scale-job-ops-change-request-2026-05-25.md
 docs/product/archive/fni-large-scan-async-job-change-request-2026-05-25.md
 ```
 
