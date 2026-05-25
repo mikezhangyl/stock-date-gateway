@@ -1,6 +1,26 @@
 # FNI Breadth Window Cancelled Job Retry Change Request - 2026-05-25
 
-Status: active request
+Archive status: implemented and accepted
+
+Archived on: 2026-05-25
+
+Gateway implementation commit: `10843f0 fix: resume retryable breadth jobs`
+
+Acceptance evidence:
+
+- Gateway unit/integration suite: `uv run pytest` -> `90 passed`, coverage `81.58%`
+- Gateway lint: `uv run ruff check .` -> passed
+- Runtime 500-symbol/20-trading-day breadth-window retry:
+  - original job id `breadth-window-ef97409a50b8feec`
+  - first retry scenario produced `cancelled`
+  - same semantic retry returned HTTP `202` with `status=accepted`
+  - retried job became `running`, not terminal `cancelled`
+  - partial rows remained readable
+  - `/api/health` stayed HTTP `200`
+- FNI gateway conformance rerun: `13/13` passed
+- FNI 100-symbol stress rerun: `completed`
+
+Status: archived request
 
 Upstream: `fund-narrative-intelligence` (`FNI`)
 
