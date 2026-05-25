@@ -89,6 +89,24 @@ def test_tushare_client_paces_calls_when_minute_budget_is_exhausted() -> None:
     assert sleeps == [60.0]
 
 
+def test_tushare_client_defaults_to_500_calls_per_minute(monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.delenv("TUSHARE_RATE_LIMIT_PER_MINUTE", raising=False)
+
+    client = TushareMarketDataClient()
+
+    assert client.rate_limit_per_minute == 500
+
+
+def test_tushare_client_rate_limit_can_be_configured(monkeypatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.setenv("TUSHARE_RATE_LIMIT_PER_MINUTE", "300")
+
+    client = TushareMarketDataClient()
+
+    assert client.rate_limit_per_minute == 300
+
+
 def test_chip_distribution_retries_transient_tushare_failures() -> None:
     fake_pro = FakeTusharePro()
     fake_pro.failures_before_success = 2

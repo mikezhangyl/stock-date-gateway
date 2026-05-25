@@ -26,6 +26,15 @@ curl http://127.0.0.1:8700/api/health
 tail -f /tmp/stock-data-gateway.err.log
 ```
 
+Tushare request pacing is controlled by:
+
+```bash
+TUSHARE_RATE_LIMIT_PER_MINUTE=500
+```
+
+The default is `500` calls per minute. Override it in `.env.local` or in the
+LaunchAgent environment if the token tier changes.
+
 Stop it:
 
 ```bash

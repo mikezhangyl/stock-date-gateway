@@ -17,6 +17,24 @@ def test_load_environment_reads_local_env_file(tmp_path, monkeypatch) -> None:
     assert settings.tushare_token == "test-token"
 
 
+def test_tushare_rate_limit_defaults_to_500_per_minute(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TUSHARE_RATE_LIMIT_PER_MINUTE", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.tushare_rate_limit_per_minute == 500
+
+
+def test_tushare_rate_limit_can_be_configured_from_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TUSHARE_RATE_LIMIT_PER_MINUTE", "300")
+
+    settings = Settings.from_env()
+
+    assert settings.tushare_rate_limit_per_minute == 300
+
+
 def test_tushare_error_code_maps_known_errors() -> None:
     assert tushare_error_code(GatewayErrorCode.NO_PERMISSION) == 403
     assert tushare_error_code(GatewayErrorCode.MISSING_TOKEN) == 401

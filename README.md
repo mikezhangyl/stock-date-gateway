@@ -27,6 +27,9 @@ scripts/dev_gateway.sh
 Put provider secrets in `.env.local`; the gateway owns the real Tushare token and
 does not trust or forward caller-supplied tokens.
 
+Tushare pacing is configurable with `TUSHARE_RATE_LIMIT_PER_MINUTE`. The default
+is `500`, matching the 5000-point Tushare tier.
+
 ## Fund Narrative Intelligence
 
 `fund-narrative-intelligence` should integrate through the local HTTP facade, not

@@ -21,6 +21,8 @@
     <string>8700</string>
     <key>MARKET_DATA_HOME</key>
     <string>/Users/mikezhang/Coding/AI-Learning/stock-data-gateway/data</string>
+    <key>TUSHARE_RATE_LIMIT_PER_MINUTE</key>
+    <string>500</string>
   </dict>
   <key>KeepAlive</key>
   <true/>
