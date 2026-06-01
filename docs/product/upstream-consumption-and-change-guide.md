@@ -182,6 +182,14 @@ Normalized HTTP routes:
 | `/api/v1/market-data/eastmoney/main-capital-flow` | `eastmoney` | route 已保留，返回空 rows，等待字段映射 |
 | `/api/v1/market-data/akshare/sector-concepts` | `akshare` | 已实现，依赖 optional `akshare` 包 |
 | `/api/v1/market-data/akshare/limit-up-down` | `akshare` | 已实现，依赖 optional `akshare` 包 |
+| `/api/v1/market-data/stocks/sector-memberships` | `local_gateway/akshare` | 已实现，SQLite 物化反查索引 |
+| `/api/v1/market-data/funds/profile` | `local_gateway/tushare/eastmoney` | 已实现，SQLite cache + Tushare/EastMoney fallback |
+| `/api/v1/market-data/funds/holdings` | `local_gateway/tushare/eastmoney` | 已实现，SQLite cache + Tushare/EastMoney fallback |
+| `/api/v1/market-data/source-events/official-filings` | `local_gateway/sec_edgar` | 已实现，SEC EDGAR metadata source events |
+| `/api/v1/market-data/source-events/official-disclosures` | `local_gateway/akshare` | 已实现，CN official disclosure metadata source events |
+| `/api/v1/market-data/source-events/news-context` | `local_gateway/tushare` | 已实现，public news context source events |
+| `/api/v1/market-data/source-events/social-heat` | `local_gateway/stocktwits` | 已实现，默认禁用，显式启用后返回 heat signal |
+| `/api/v1/market-data/source-events/news-permission-smoke` | `local_gateway/tushare` | 已实现，Tushare news 权限/字段 smoke |
 | `/api/v1/market-data/jobs/daily-bars` | `tushare` | 已实现，异步 large scan job |
 | `/api/v1/market-data/jobs/breadth-window` | `tushare` | 已实现，异步 breadth window cache-warming job |
 | `/api/v1/market-data/jobs` | `tushare` | 已实现，job list/filter |
@@ -333,6 +341,73 @@ after the previous job ended as `cancelled`, `failed`, or `interrupted`, the
 gateway reactivates that compatible partial job instead of returning the old
 terminal status. Already fetched rows remain readable and are not duplicated;
 the resumed worker skips completed symbols and continues the remaining symbols.
+
+FNI 的 Can-Do market-data capability pack 已经归档在
+`docs/product/archive/fni-can-do-market-data-capability-pack-change-request-2026-05-25.md`。
+该阶段新增 provider-neutral sector concepts、ETF spot、provider-neutral
+limit-up/down 和 Tushare news briefs，供 FNI 后续 scanner/report 直接消费。
+
+FNI stock sector membership capability 已新增：
+
+```text
+POST /api/v1/market-data/stocks/sector-memberships
+```
+
+请求要求 `symbols` 和 `trade_date`，可选 `sector_types`、
+`limit_per_symbol`、`force_refresh`、`sector_universe_limit`、
+`timeout_seconds`、`upstream_timeout_seconds`。当前 Can-Do 支持 `concept` 反查：
+gateway 通过 sector constituent provider 建立
+`sector -> constituents -> symbol memberships` 反向索引，并把 rows 与
+no-coverage markers 持久化到本地 SQLite。重复请求优先返回
+`meta.cache.mode=cache`；没有 membership 的 symbol 会列入
+`meta.coverage.missing_symbols`，上游扫描失败会返回 `meta.status=degraded`
+和结构化 `meta.warning`，不会静默返回空成功。`sector_universe_limit=0`
+只扫描 gateway seed boards，不会调用 broader sector universe；coverage 里
+的 `board_results` 会区分 `upstream_failed`、`timeout`、`empty_board` 和
+`symbol_uncovered`。
+
+FNI fund profile / holdings capability 已新增：
+
+```text
+GET /api/v1/market-data/funds/profile?fund_code=161725
+GET /api/v1/market-data/funds/holdings?fund_code=161725&limit=10
+```
+
+这两个 route 使用 provider-neutral normalized envelope。Gateway 先读本地
+SQLite 表 `fund_profile_rows`、`fund_holding_rows` 和
+`fund_holding_coverage`，cache miss 后优先请求 Tushare `fund_basic` /
+`fund_portfolio`，再 fallback 到 EastMoney/Tiantian public fund position
+endpoint。成功 rows 会保留 `source` / `provider` / `source_url` / `as_of_date`
+语义；两边都失败时返回 HTTP 200 degraded payload，并在
+`meta.coverage.provider_attempts` 里列出 cache、Tushare、EastMoney 的尝试结果。
+Gateway 不返回 mock holdings；参数错误仍然是 HTTP 400。
+
+FNI narrative source lakehouse capability 已新增：
+
+```text
+GET /api/v1/market-data/source-events/official-filings?cik=0000320193&limit=20
+GET /api/v1/market-data/source-events/official-disclosures?symbol=000001&start_date=2026-05-01&end_date=2026-06-01
+GET /api/v1/market-data/source-events/news-context?src=sina&start_datetime=2026-06-01%2009:00:00&end_datetime=2026-06-01%2010:00:00
+GET /api/v1/market-data/source-events/social-heat?symbol=AAPL&enabled=true
+POST /api/v1/market-data/source-events/news-permission-smoke
+```
+
+这些 route 统一返回 normalized envelope，并增加 `meta.source`、
+`meta.provider_attempts`、`meta.degradation_events`、`meta.source_quality`、
+`meta.trust_tier`、`meta.license_scope`、`meta.retention_policy`、
+`meta.raw_storage_policy`、`meta.parser_version` 和 `meta.cache_hit`。
+SEC EDGAR / CN disclosure metadata 标记为 `trusted_fact`；public news context
+标记为 `context_only`；Stocktwits/community 数据标记为 `heat_signal_only`，
+默认禁用，不能满足 trusted evidence 要求。
+
+Gateway 当前在本地 SQLite 中创建 lightweight source lakehouse 表：
+`source_registry`、`source_fetch_runs`、`source_documents`、`source_events`、
+`evidence_spans`、`entity_mentions`、`resolved_entities`、
+`source_quality_snapshots` 和 `source_blob_manifests`。本地开发如需
+Postgres + MinIO runtime，可使用
+`docker-compose.source-lakehouse.yml` 的 `source-lakehouse` profile；详见
+`docs/runbooks/source-lakehouse-runtime.md`。FNI 仍只存 consumer artifacts 和
+report outputs，不存 canonical raw upstream source data。
 
 ## Change Request 生命周期
 

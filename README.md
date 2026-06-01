@@ -73,7 +73,56 @@ The gateway supports the Tushare endpoints currently exercised by FNI market
 quotes, valuation snapshots, and financial metrics: `daily`, `daily_basic`,
 `stock_basic`, `income`, and `fina_indicator`. It also exposes normalized
 Tushare daily/index/fund/calendar/metadata routes, EastMoney market quotes, and
-optional AkShare sector/limit-up-down routes.
+optional AkShare sector/ETF/limit-up-down routes through provider-neutral FNI
+surfaces:
+
+```text
+GET  /api/v1/market-data/sectors/concepts
+GET  /api/v1/market-data/sectors/constituents
+POST /api/v1/market-data/stocks/sector-memberships
+GET  /api/v1/market-data/funds/profile
+GET  /api/v1/market-data/funds/holdings
+GET  /api/v1/market-data/capital/northbound
+GET  /api/v1/market-data/capital/main-flow
+GET  /api/v1/market-data/etf/basic
+GET  /api/v1/market-data/etf/spot
+GET  /api/v1/market-data/etf/flow
+GET  /api/v1/market-data/index/constituents
+GET  /api/v1/market-data/margin/summary
+GET  /api/v1/market-data/margin/detail
+GET  /api/v1/market-data/market/limit-up-down
+GET  /api/v1/market-data/market/dragon-tiger
+GET  /api/v1/market-data/fundamentals/earnings-calendar
+GET  /api/v1/market-data/source-events/official-filings
+GET  /api/v1/market-data/source-events/official-disclosures
+GET  /api/v1/market-data/source-events/news-context
+GET  /api/v1/market-data/source-events/social-heat
+POST /api/v1/market-data/news/briefs
+POST /api/v1/market-data/source-events/news-permission-smoke
+```
+
+The stock sector membership route materializes a local SQLite reverse index from
+sector constituents so repeated FNI holding reports can look up
+`symbol -> concept memberships` without rescanning sector names. Pass
+`sector_universe_limit: 0` to scan only gateway seed boards; timeout and upstream
+failures return HTTP 200 degraded metadata with board-level diagnostics.
+
+The fund profile and holdings routes cache normalized rows in SQLite, try
+Tushare first, and fall back to EastMoney/Tiantian public fund positions. When
+cache and upstream providers are unavailable, they return HTTP 200 degraded
+metadata with provider-attempt diagnostics instead of mock holdings or long
+socket waits.
+
+The news route uses Tushare `news` only and returns
+`PROVIDER_PERMISSION_REQUIRED` when the configured token lacks that permission.
+
+Narrative source-event routes add a lightweight source lakehouse slice for FNI:
+SEC EDGAR and CN disclosure metadata are labeled `trusted_fact`, public news is
+`context_only`, and Stocktwits/community output is `heat_signal_only` and
+disabled by default. Source events persist normalized metadata, fetch runs,
+quality snapshots, evidence snippets, entity mentions, and Bronze blob
+manifests in SQLite; a Docker Compose profile for Postgres + MinIO local
+development is documented in `docs/runbooks/source-lakehouse-runtime.md`.
 
 Run the gateway-backed FNI acceptance suite:
 
@@ -86,6 +135,8 @@ uv run market-gateway-fni-acceptance \
 See `docs/runbooks/fni-gateway-acceptance.md` for the operational runbook.
 See `docs/runbooks/background-service-and-backfill.md` for LaunchAgent and CYQ
 backfill setup.
+See `docs/runbooks/source-lakehouse-runtime.md` for the local source lakehouse
+runtime profile.
 See `docs/product/upstream-consumption-and-change-guide.md` for the upstream
 consumption contract and change request template.
 See `docs/product/archive/` for implemented FNI change request records.

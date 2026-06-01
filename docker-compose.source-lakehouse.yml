@@ -1,0 +1,59 @@
+name: stock-data-gateway-source-lakehouse
+
+services:
+  source-postgres:
+    image: postgres:16-alpine
+    profiles: ["source-lakehouse"]
+    environment:
+      POSTGRES_DB: ${SOURCE_LAKEHOUSE_POSTGRES_DB:-source_lakehouse}
+      POSTGRES_USER: ${SOURCE_LAKEHOUSE_POSTGRES_USER:-gateway}
+      POSTGRES_PASSWORD: ${SOURCE_LAKEHOUSE_POSTGRES_PASSWORD:-gateway-local-dev}
+    ports:
+      - "${SOURCE_LAKEHOUSE_POSTGRES_HOST:-127.0.0.1}:${SOURCE_LAKEHOUSE_POSTGRES_PORT:-8742}:5432"
+    volumes:
+      - source_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  source-minio:
+    image: minio/minio:latest
+    profiles: ["source-lakehouse"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${SOURCE_LAKEHOUSE_MINIO_ROOT_USER:-gateway}
+      MINIO_ROOT_PASSWORD: ${SOURCE_LAKEHOUSE_MINIO_ROOT_PASSWORD:-gateway-local-dev}
+    ports:
+      - "${SOURCE_LAKEHOUSE_MINIO_HOST:-127.0.0.1}:${SOURCE_LAKEHOUSE_MINIO_API_PORT:-9000}:9000"
+      - "${SOURCE_LAKEHOUSE_MINIO_HOST:-127.0.0.1}:${SOURCE_LAKEHOUSE_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - source_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  source-minio-init:
+    image: minio/mc:latest
+    profiles: ["source-lakehouse"]
+    depends_on:
+      source-minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${SOURCE_LAKEHOUSE_MINIO_ROOT_USER:-gateway}
+      MINIO_ROOT_PASSWORD: ${SOURCE_LAKEHOUSE_MINIO_ROOT_PASSWORD:-gateway-local-dev}
+      SOURCE_LAKEHOUSE_BRONZE_BUCKET: ${SOURCE_LAKEHOUSE_BRONZE_BUCKET:-source-bronze}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://source-minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$SOURCE_LAKEHOUSE_BRONZE_BUCKET"
+        mc anonymous set none "local/$$SOURCE_LAKEHOUSE_BRONZE_BUCKET"
+
+volumes:
+  source_postgres_data:
+  source_minio_data:

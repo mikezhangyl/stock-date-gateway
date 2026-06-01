@@ -119,6 +119,54 @@ class FakeProvider(ExternalDataProvider):
                     }
                 ],
             )
+        if endpoint == "fund_basic":
+            return ProviderResponse.from_rows(
+                provider=self.provider_name,
+                endpoint=endpoint,
+                rows=[
+                    {
+                        "ts_code": params.get("ts_code", "161725.SZ"),
+                        "name": "招商中证白酒指数A",
+                        "fund_type": "股票型",
+                        "market": "场内",
+                        "found_date": "20150527",
+                    }
+                ],
+            )
+        if endpoint == "fund_portfolio":
+            return ProviderResponse.from_rows(
+                provider=self.provider_name,
+                endpoint=endpoint,
+                rows=[
+                    {
+                        "ts_code": params.get("ts_code", "161725.SZ"),
+                        "ann_date": "20260420",
+                        "end_date": "20260522",
+                        "symbol": "600519",
+                        "stk_code": "600519.SH",
+                        "stk_name": "贵州茅台",
+                        "stk_mkv_ratio": 9.8,
+                    },
+                    {
+                        "ts_code": params.get("ts_code", "161725.SZ"),
+                        "ann_date": "20260420",
+                        "end_date": "20260522",
+                        "symbol": "000858",
+                        "stk_code": "000858.SZ",
+                        "stk_name": "五粮液",
+                        "stk_mkv_ratio": 8.1,
+                    },
+                    {
+                        "ts_code": params.get("ts_code", "161725.SZ"),
+                        "ann_date": "20260331",
+                        "end_date": "20260331",
+                        "symbol": "000568",
+                        "stk_code": "000568.SZ",
+                        "stk_name": "泸州老窖",
+                        "stk_mkv_ratio": 7.1,
+                    },
+                ],
+            )
         if endpoint == "trade_cal":
             if params.get("start_date") and params.get("end_date"):
                 start = datetime.strptime(str(params["start_date"]), "%Y%m%d")
@@ -201,6 +249,19 @@ class FakeProvider(ExternalDataProvider):
                         "trade_date": params["trade_date"],
                         "price": 10.0,
                         "percent": 0.25,
+                    }
+                ],
+            )
+        if endpoint == "news":
+            return ProviderResponse.from_rows(
+                provider=self.provider_name,
+                endpoint=endpoint,
+                rows=[
+                    {
+                        "datetime": params["start_date"],
+                        "title": "市场快讯",
+                        "content": "结构化新闻正文",
+                        "channels": "财经",
                     }
                 ],
             )

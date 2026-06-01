@@ -5,7 +5,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,6 +17,7 @@ from stock_data_gateway.cache.sqlite_store import SQLiteCacheStore
 from stock_data_gateway.core.config import Settings
 from stock_data_gateway.core.errors import GatewayError, GatewayErrorCode, tushare_error_code
 from stock_data_gateway.domain.provider import QueryResult
+from stock_data_gateway.funds import FundDataResult, FundDataService
 from stock_data_gateway.jobs.daily_bars import (
     DailyBarsJobManager,
     DailyBarsJobRequest,
@@ -26,9 +27,14 @@ from stock_data_gateway.jobs.daily_bars import (
 )
 from stock_data_gateway.policies.registry import create_default_policy_registry
 from stock_data_gateway.providers.akshare.adapter import AkshareProvider
+from stock_data_gateway.providers.cninfo.adapter import CninfoProvider
 from stock_data_gateway.providers.eastmoney.adapter import EastmoneyProvider
+from stock_data_gateway.providers.sec_edgar.adapter import SecEdgarProvider
+from stock_data_gateway.providers.stocktwits.adapter import StocktwitsProvider
 from stock_data_gateway.providers.tushare.adapter import TushareProvider
 from stock_data_gateway.providers.tushare.client import TushareMarketDataClient
+from stock_data_gateway.sector_memberships import SectorMembershipIndex, SectorMembershipResult
+from stock_data_gateway.source_events import SourceEventResult, SourceEventService
 
 JSON_BODY = Body(default_factory=dict)
 _FETCH_SEMAPHORE = threading.BoundedSemaphore(int(os.getenv("GATEWAY_FETCH_CONCURRENCY", "4")))
@@ -39,12 +45,21 @@ async def _lifespan(app: FastAPI) -> Iterator[None]:
     yield
     if app.state.daily_bars_jobs is not None:
         app.state.daily_bars_jobs.close()
+    if app.state.stock_sector_memberships is not None:
+        app.state.stock_sector_memberships.close()
+    if app.state.fund_data is not None:
+        app.state.fund_data.close()
+    if app.state.source_events is not None:
+        app.state.source_events.close()
 
 
 def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
     app = FastAPI(title="Local Market Data Gateway", lifespan=_lifespan)
     app.state.gateway = gateway
     app.state.daily_bars_jobs = None
+    app.state.stock_sector_memberships = None
+    app.state.fund_data = None
+    app.state.source_events = None
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -244,6 +259,666 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
             params={"trade_date": trade_date},
         )
 
+    @app.get("/api/v1/market-data/sectors/concepts")
+    def sector_concepts(trade_date: str = Query(default=""), limit: str = Query(default="100")) -> JSONResponse:
+        try:
+            params: dict[str, Any] = {"limit": _optional_positive_int(limit, default=100, maximum=5000)}
+            if trade_date.strip():
+                params["trade_date"] = _iso_date(_compact_date(trade_date))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="sector_concepts",
+                params=params,
+                response_provider_name="local_gateway",
+                response_endpoint="sectors_concepts",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/sectors/constituents")
+    def sector_constituents(
+        sector_name: str = Query(default=""),
+        trade_date: str = Query(default=""),
+        limit: str = Query(default="50"),
+    ) -> JSONResponse:
+        try:
+            resolved_sector_name = str(_required({"sector_name": sector_name}, "sector_name")).strip()
+            if not resolved_sector_name:
+                raise ValueError("sector_name is required")
+            params: dict[str, Any] = {
+                "sector_name": resolved_sector_name,
+                "limit": _optional_positive_int(limit, default=50, maximum=5000),
+            }
+            if trade_date.strip():
+                params["trade_date"] = _iso_date(_compact_date(trade_date))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="sector_constituents",
+                params=params,
+                response_provider_name="local_gateway",
+                response_endpoint="sectors_constituents",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.post("/api/v1/market-data/stocks/sector-memberships")
+    def stock_sector_memberships(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            symbols = _symbols(payload)
+            trade_date = _iso_date(_compact_date(_required(payload, "trade_date")))
+            sector_types = _sector_types(payload.get("sector_types"))
+            limit_per_symbol = _optional_positive_int(payload.get("limit_per_symbol"), default=50, maximum=200)
+            sector_universe_limit = _optional_positive_int(
+                payload.get("sector_universe_limit"),
+                default=80,
+                maximum=1000,
+            )
+            request_timeout_seconds = _optional_positive_float(
+                payload.get("timeout_seconds"),
+                default=12.0,
+                maximum=15.0,
+                field_name="timeout_seconds",
+            )
+            upstream_timeout_seconds = _optional_positive_float(
+                payload.get("upstream_timeout_seconds"),
+                default=4.0,
+                maximum=request_timeout_seconds,
+                field_name="upstream_timeout_seconds",
+            )
+            with _fetch_slot():
+                result = _stock_sector_membership_index(app).memberships(
+                    symbols=symbols,
+                    trade_date=trade_date,
+                    sector_types=sector_types,
+                    limit_per_symbol=limit_per_symbol,
+                    force_refresh=bool(payload.get("force_refresh", False)),
+                    sector_universe_limit=sector_universe_limit,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=upstream_timeout_seconds,
+                )
+            return _normalized_sector_membership_response(result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/funds/profile")
+    def fund_profile(
+        fund_code: str = Query(default=""),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_fund_code = _fund_code(fund_code)
+            request_timeout_seconds = _optional_positive_float(
+                timeout_seconds,
+                default=12.0,
+                maximum=15.0,
+                field_name="timeout_seconds",
+            )
+            resolved_upstream_timeout_seconds = _optional_positive_float(
+                upstream_timeout_seconds,
+                default=4.0,
+                maximum=request_timeout_seconds,
+                field_name="upstream_timeout_seconds",
+            )
+            with _fetch_slot():
+                result = _fund_data_service(app).profile(
+                    fund_code=resolved_fund_code,
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_fund_data_response("fund_profile", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/funds/holdings")
+    def fund_holdings(
+        fund_code: str = Query(default=""),
+        limit: str = Query(default="10"),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_fund_code = _fund_code(fund_code)
+            resolved_limit = _optional_positive_int(limit, default=10, maximum=100)
+            request_timeout_seconds = _optional_positive_float(
+                timeout_seconds,
+                default=12.0,
+                maximum=15.0,
+                field_name="timeout_seconds",
+            )
+            resolved_upstream_timeout_seconds = _optional_positive_float(
+                upstream_timeout_seconds,
+                default=4.0,
+                maximum=request_timeout_seconds,
+                field_name="upstream_timeout_seconds",
+            )
+            with _fetch_slot():
+                result = _fund_data_service(app).holdings(
+                    fund_code=resolved_fund_code,
+                    limit=resolved_limit,
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_fund_data_response("fund_holdings", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/source-events/official-filings")
+    def source_events_official_filings(
+        cik: str = Query(default="0000320193"),
+        limit: str = Query(default="20"),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_limit = _optional_positive_int(limit, default=20, maximum=100)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                timeout_seconds,
+                upstream_timeout_seconds,
+            )
+            with _fetch_slot():
+                result = _source_event_service(app).official_filings(
+                    cik=cik,
+                    limit=resolved_limit,
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_source_event_response("official_filings", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/source-events/official-disclosures")
+    def source_events_official_disclosures(
+        symbol: str = Query(default="000001"),
+        start_date: str = Query(default=""),
+        end_date: str = Query(default=""),
+        limit: str = Query(default="20"),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_start_date, resolved_end_date = _source_event_date_range(start_date, end_date)
+            resolved_limit = _optional_positive_int(limit, default=20, maximum=100)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                timeout_seconds,
+                upstream_timeout_seconds,
+            )
+            with _fetch_slot():
+                result = _source_event_service(app).official_disclosures(
+                    symbol=symbol.strip().upper(),
+                    start_date=resolved_start_date,
+                    end_date=resolved_end_date,
+                    limit=resolved_limit,
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_source_event_response("official_disclosures", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/source-events/news-context")
+    def source_events_news_context(
+        src: str = Query(default="sina"),
+        start_datetime: str = Query(default=""),
+        end_datetime: str = Query(default=""),
+        query: str = Query(default=""),
+        limit: str = Query(default="20"),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_start_datetime, resolved_end_datetime = _source_event_datetime_range(
+                start_datetime,
+                end_datetime,
+            )
+            resolved_limit = _optional_positive_int(limit, default=20, maximum=100)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                timeout_seconds,
+                upstream_timeout_seconds,
+            )
+            with _fetch_slot():
+                result = _source_event_service(app).news_context(
+                    src=src.strip() or "sina",
+                    start_datetime=resolved_start_datetime,
+                    end_datetime=resolved_end_datetime,
+                    query=query.strip(),
+                    limit=resolved_limit,
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_source_event_response("news_context", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/source-events/social-heat")
+    def source_events_social_heat(
+        symbol: str = Query(default="AAPL"),
+        limit: str = Query(default="5"),
+        enabled: bool = Query(default=False),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_limit = _optional_positive_int(limit, default=5, maximum=30)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                timeout_seconds,
+                upstream_timeout_seconds,
+            )
+            with _fetch_slot():
+                result = _source_event_service(app).social_heat(
+                    symbol=symbol.strip().upper() or "AAPL",
+                    limit=resolved_limit,
+                    enabled=enabled or _truthy_env("GATEWAY_SOURCE_EVENTS_ENABLE_SOCIAL_HEAT"),
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_source_event_response("social_heat", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.post("/api/v1/market-data/source-events/news-permission-smoke")
+    def source_events_news_permission_smoke(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            start_datetime, end_datetime = _source_event_datetime_range(
+                str(payload.get("start_datetime") or ""),
+                str(payload.get("end_datetime") or ""),
+            )
+            src_values = _optional_string_list(payload.get("src_values"))
+            limit_per_src = _optional_positive_int(payload.get("limit_per_src"), default=1, maximum=20)
+            upstream_timeout_seconds = _optional_positive_float(
+                payload.get("upstream_timeout_seconds"),
+                default=5.0,
+                maximum=15.0,
+                field_name="upstream_timeout_seconds",
+            )
+            with _fetch_slot():
+                result = _source_event_service(app).news_permission_smoke(
+                    src_values=src_values,
+                    start_datetime=start_datetime,
+                    end_datetime=end_datetime,
+                    limit_per_src=limit_per_src,
+                    upstream_timeout_seconds=upstream_timeout_seconds,
+                )
+            return _normalized_source_event_response("news_permission_smoke", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.post("/api/v1/market-data/narrative/source-events/official-filings")
+    def narrative_source_events_official_filings(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            resolved_limit = _optional_positive_int(payload.get("limit"), default=10, maximum=100)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                payload.get("timeout_seconds", ""),
+                payload.get("upstream_timeout_seconds", ""),
+            )
+            symbols = _optional_symbols(payload.get("symbols"))
+            with _fetch_slot():
+                result = _source_event_service(app).official_filings(
+                    cik=str(payload.get("cik") or _cik_from_symbols(symbols) or "0000320193"),
+                    limit=resolved_limit,
+                    force_refresh=bool(payload.get("force_refresh", False)),
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_narrative_source_event_response(
+                "narrative_official_filings",
+                result,
+                requested_symbols=symbols,
+                query=str(payload.get("query") or ""),
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.post("/api/v1/market-data/narrative/source-events/official-disclosures")
+    def narrative_source_events_official_disclosures(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            resolved_start_date, resolved_end_date = _source_event_date_range(
+                str(payload.get("start_date") or ""),
+                str(payload.get("end_date") or ""),
+            )
+            resolved_limit = _optional_positive_int(payload.get("limit"), default=10, maximum=100)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                payload.get("timeout_seconds", ""),
+                payload.get("upstream_timeout_seconds", ""),
+            )
+            symbols = _optional_symbols(payload.get("symbols"))
+            symbol = str(payload.get("symbol") or _first_base_symbol(symbols) or "000001").upper()
+            with _fetch_slot():
+                result = _source_event_service(app).official_disclosures(
+                    symbol=symbol,
+                    start_date=resolved_start_date,
+                    end_date=resolved_end_date,
+                    limit=resolved_limit,
+                    force_refresh=bool(payload.get("force_refresh", False)),
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_narrative_source_event_response(
+                "narrative_official_disclosures",
+                result,
+                requested_symbols=[symbol],
+                query=str(payload.get("query") or ""),
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.post("/api/v1/market-data/narrative/source-events/news-context")
+    def narrative_source_events_news_context(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            resolved_start_datetime, resolved_end_datetime = _source_event_datetime_range(
+                str(payload.get("start_datetime") or ""),
+                str(payload.get("end_datetime") or ""),
+            )
+            resolved_limit = _optional_positive_int(payload.get("limit"), default=10, maximum=100)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                payload.get("timeout_seconds", ""),
+                payload.get("upstream_timeout_seconds", ""),
+            )
+            query = str(payload.get("query") or "")
+            with _fetch_slot():
+                result = _source_event_service(app).news_context(
+                    src=str(payload.get("src") or "sina").strip() or "sina",
+                    start_datetime=resolved_start_datetime,
+                    end_datetime=resolved_end_datetime,
+                    query=query,
+                    limit=resolved_limit,
+                    force_refresh=bool(payload.get("force_refresh", False)),
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_narrative_source_event_response(
+                "narrative_news_context",
+                result,
+                requested_symbols=_optional_symbols(payload.get("symbols")),
+                query=query,
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.post("/api/v1/market-data/narrative/source-events/social-heat")
+    def narrative_source_events_social_heat(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            resolved_limit = _optional_positive_int(payload.get("limit"), default=5, maximum=30)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                payload.get("timeout_seconds", ""),
+                payload.get("upstream_timeout_seconds", ""),
+            )
+            symbols = _optional_symbols(payload.get("symbols"))
+            symbol = str(payload.get("symbol") or _first_base_symbol(symbols) or "AAPL").upper()
+            with _fetch_slot():
+                result = _source_event_service(app).social_heat(
+                    symbol=symbol,
+                    limit=resolved_limit,
+                    enabled=bool(payload.get("enabled", False))
+                    or _truthy_env("GATEWAY_SOURCE_EVENTS_ENABLE_SOCIAL_HEAT"),
+                    force_refresh=bool(payload.get("force_refresh", False)),
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_narrative_source_event_response(
+                "narrative_social_heat",
+                result,
+                requested_symbols=[symbol],
+                query=str(payload.get("query") or ""),
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/etf/spot")
+    def etf_spot(limit: str = Query(default="100")) -> JSONResponse:
+        try:
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="etf_spot",
+                params={"limit": _optional_positive_int(limit, default=100, maximum=5000)},
+                response_provider_name="local_gateway",
+                response_endpoint="etf_spot",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/etf/basic")
+    def etf_basic(market: str = Query(default="cn"), limit: str = Query(default="50")) -> JSONResponse:
+        try:
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="etf_basic",
+                params={
+                    "market": market,
+                    "limit": _optional_positive_int(limit, default=50, maximum=5000),
+                },
+                response_provider_name="local_gateway",
+                response_endpoint="etf_basic",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/capital/northbound")
+    def capital_northbound(trade_date: str = Query(default="")) -> JSONResponse:
+        try:
+            resolved_trade_date = _iso_date(_compact_date(_required({"trade_date": trade_date}, "trade_date")))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="eastmoney",
+                endpoint="northbound_capital",
+                params={"trade_date": resolved_trade_date},
+                response_provider_name="local_gateway",
+                response_endpoint="capital_northbound",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/capital/main-flow")
+    def capital_main_flow(trade_date: str = Query(default=""), limit: str = Query(default="50")) -> JSONResponse:
+        try:
+            resolved_trade_date = _iso_date(_compact_date(_required({"trade_date": trade_date}, "trade_date")))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="eastmoney",
+                endpoint="main_capital_flow",
+                params={
+                    "trade_date": resolved_trade_date,
+                    "limit": _optional_positive_int(limit, default=50, maximum=5000),
+                },
+                response_provider_name="local_gateway",
+                response_endpoint="capital_main_flow",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/etf/flow")
+    def etf_flow(trade_date: str = Query(default=""), limit: str = Query(default="50")) -> JSONResponse:
+        try:
+            resolved_trade_date = _iso_date(_compact_date(_required({"trade_date": trade_date}, "trade_date")))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="etf_flow",
+                params={
+                    "trade_date": resolved_trade_date,
+                    "limit": _optional_positive_int(limit, default=50, maximum=5000),
+                },
+                response_provider_name="local_gateway",
+                response_endpoint="etf_flow",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/index/constituents")
+    def index_constituents(
+        index_symbol: str = Query(default=""),
+        trade_date: str = Query(default=""),
+        limit: str = Query(default="50"),
+    ) -> JSONResponse:
+        try:
+            resolved_index_symbol = str(_required({"index_symbol": index_symbol}, "index_symbol")).strip().upper()
+            if not resolved_index_symbol:
+                raise ValueError("index_symbol is required")
+            params: dict[str, Any] = {
+                "index_symbol": resolved_index_symbol,
+                "limit": _optional_positive_int(limit, default=50, maximum=5000),
+            }
+            if trade_date.strip():
+                params["trade_date"] = _iso_date(_compact_date(trade_date))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="index_constituents",
+                params=params,
+                response_provider_name="local_gateway",
+                response_endpoint="index_constituents",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/margin/summary")
+    def margin_summary(trade_date: str = Query(default="")) -> JSONResponse:
+        try:
+            resolved_trade_date = _iso_date(_compact_date(_required({"trade_date": trade_date}, "trade_date")))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="margin_summary",
+                params={"trade_date": resolved_trade_date},
+                response_provider_name="local_gateway",
+                response_endpoint="margin_summary",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/margin/detail")
+    def margin_detail(trade_date: str = Query(default=""), limit: str = Query(default="50")) -> JSONResponse:
+        try:
+            resolved_trade_date = _iso_date(_compact_date(_required({"trade_date": trade_date}, "trade_date")))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="margin_detail",
+                params={
+                    "trade_date": resolved_trade_date,
+                    "limit": _optional_positive_int(limit, default=50, maximum=5000),
+                },
+                response_provider_name="local_gateway",
+                response_endpoint="margin_detail",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/fundamentals/earnings-calendar")
+    def earnings_calendar(
+        start_date: str = Query(default=""),
+        end_date: str = Query(default=""),
+        limit: str = Query(default="50"),
+    ) -> JSONResponse:
+        try:
+            resolved_start_date = _iso_date(_compact_date(_required({"start_date": start_date}, "start_date")))
+            resolved_end_date = _iso_date(_compact_date(_required({"end_date": end_date}, "end_date")))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="earnings_calendar",
+                params={
+                    "start_date": resolved_start_date,
+                    "end_date": resolved_end_date,
+                    "limit": _optional_positive_int(limit, default=50, maximum=5000),
+                },
+                response_provider_name="local_gateway",
+                response_endpoint="earnings_calendar",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/market/dragon-tiger")
+    def market_dragon_tiger(trade_date: str = Query(default=""), limit: str = Query(default="50")) -> JSONResponse:
+        try:
+            resolved_trade_date = _iso_date(_compact_date(_required({"trade_date": trade_date}, "trade_date")))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="dragon_tiger",
+                params={
+                    "trade_date": resolved_trade_date,
+                    "limit": _optional_positive_int(limit, default=50, maximum=5000),
+                },
+                response_provider_name="local_gateway",
+                response_endpoint="market_dragon_tiger",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/market/limit-up-down")
+    def market_limit_up_down(trade_date: str = Query(default="")) -> JSONResponse:
+        try:
+            resolved_trade_date = _iso_date(_compact_date(_required({"trade_date": trade_date}, "trade_date")))
+            return _provider_success_or_empty(
+                _gateway(app),
+                provider_name="akshare",
+                endpoint="limit_up_down",
+                params={"trade_date": resolved_trade_date},
+                response_provider_name="local_gateway",
+                response_endpoint="market_limit_up_down",
+            )
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.post("/api/v1/market-data/news/briefs")
+    def news_briefs(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
+        try:
+            source_provider = str(payload.get("source_provider") or "tushare").strip().lower()
+            if source_provider != "tushare":
+                return _normalized_error(
+                    GatewayErrorCode.INVALID_REQUEST.value,
+                    "source_provider must be tushare for news briefs.",
+                    400,
+                )
+            src = str(_required(payload, "src")).strip()
+            if not src:
+                raise ValueError("src is required")
+            start_datetime = str(payload.get("start_datetime") or payload.get("start_date") or "").strip()
+            end_datetime = str(payload.get("end_datetime") or payload.get("end_date") or "").strip()
+            if not start_datetime:
+                raise ValueError("start_datetime is required")
+            if not end_datetime:
+                raise ValueError("end_datetime is required")
+            limit = _optional_positive_int(payload.get("limit"), default=20, maximum=1500)
+            params = {"src": src, "start_date": start_datetime, "end_date": end_datetime}
+            with _fetch_slot():
+                response = _gateway(app).providers["tushare"].fetch(
+                    "news",
+                    params,
+                    fields="datetime,title,content,channels",
+                )
+            rows = _normalized_news_rows(response.rows(), src=src)[:limit]
+            return _normalized_success("tushare", "news", rows, [], cache_mode="upstream")
+        except KeyError:
+            return _normalized_error(
+                GatewayErrorCode.PROVIDER_UNAVAILABLE.value,
+                "Provider is not registered: tushare",
+                503,
+            )
+        except GatewayError as error:
+            if error.code == GatewayErrorCode.NO_PERMISSION:
+                return _normalized_error("PROVIDER_PERMISSION_REQUIRED", error.message, 403)
+            return _normalized_exception(error)
+        except ValueError as error:
+            return _normalized_exception(error)
+
     @app.post("/api/v1/market-data/chips/cyq")
     def chips_cyq(payload: dict[str, Any] = JSON_BODY) -> JSONResponse:
         try:
@@ -418,6 +1093,36 @@ def _daily_bars_jobs(app: FastAPI) -> DailyBarsJobManager:
     return app.state.daily_bars_jobs
 
 
+def _stock_sector_membership_index(app: FastAPI) -> SectorMembershipIndex:
+    if app.state.stock_sector_memberships is None:
+        gateway = _gateway(app)
+        app.state.stock_sector_memberships = SectorMembershipIndex(
+            db_path=gateway.store.path,
+            providers=gateway.providers,
+        )
+    return app.state.stock_sector_memberships
+
+
+def _fund_data_service(app: FastAPI) -> FundDataService:
+    if app.state.fund_data is None:
+        gateway = _gateway(app)
+        app.state.fund_data = FundDataService(
+            db_path=gateway.store.path,
+            providers=gateway.providers,
+        )
+    return app.state.fund_data
+
+
+def _source_event_service(app: FastAPI) -> SourceEventService:
+    if app.state.source_events is None:
+        gateway = _gateway(app)
+        app.state.source_events = SourceEventService(
+            db_path=gateway.store.path,
+            providers=gateway.providers,
+        )
+    return app.state.source_events
+
+
 def create_default_gateway(settings: Optional[Settings] = None) -> ReadThroughQueryService:
     resolved_settings = settings or Settings.from_env()
     cache_path = Path(resolved_settings.market_data_home) / "market_data.sqlite3"
@@ -436,6 +1141,9 @@ def create_default_gateway(settings: Optional[Settings] = None) -> ReadThroughQu
             "tushare": provider,
             "eastmoney": EastmoneyProvider(),
             "akshare": AkshareProvider(),
+            "cninfo": CninfoProvider(),
+            "sec_edgar": SecEdgarProvider(),
+            "stocktwits": StocktwitsProvider(),
         },
         policies,
         store,
@@ -524,13 +1232,23 @@ def _provider_success_or_empty(
     provider_name: str,
     endpoint: str,
     params: dict[str, Any],
+    response_provider_name: Optional[str] = None,
+    response_endpoint: Optional[str] = None,
 ) -> JSONResponse:
+    output_provider_name = response_provider_name or provider_name
+    output_endpoint = response_endpoint or endpoint
     try:
         with _fetch_slot():
             response = gateway.providers[provider_name].fetch(endpoint, params, fields=None)
-        return _normalized_success(provider_name, endpoint, response.rows(), [], cache_mode="upstream")
+        return _normalized_success(output_provider_name, output_endpoint, response.rows(), [], cache_mode="upstream")
     except GatewayError as error:
-        payload = _normalized_payload(provider_name, endpoint, [], cache_mode="stale_cache", cache_hit=False)
+        payload = _normalized_payload(
+            output_provider_name,
+            output_endpoint,
+            [],
+            cache_mode="stale_cache",
+            cache_hit=False,
+        )
         payload["meta"]["status"] = "degraded"
         payload["meta"]["warning"] = {"code": error.code.value, "message": error.message}
         return JSONResponse(payload)
@@ -540,6 +1258,38 @@ def _provider_success_or_empty(
             f"Provider is not registered: {provider_name}",
             503,
         )
+
+
+def _normalized_news_rows(rows: list[dict[str, Any]], *, src: str) -> list[dict[str, Any]]:
+    return [
+        {
+            **{
+                "datetime": row.get("datetime"),
+                "title": _news_title(row),
+                "content": row.get("content"),
+                "source": "tushare",
+            },
+            **({"channels": row.get("channels")} if row.get("channels") not in (None, "") else {}),
+            "src": src,
+            "provider": "tushare",
+        }
+        for row in rows
+    ]
+
+
+def _news_title(row: dict[str, Any]) -> str | None:
+    title = str(row.get("title") or "").strip()
+    if title:
+        return title
+    content = str(row.get("content") or "").strip()
+    if content.startswith("【") and "】" in content:
+        derived = content[1 : content.index("】")].strip()
+        if derived:
+            return derived
+    if content:
+        first_line = content.splitlines()[0].strip()
+        return first_line[:80] if first_line else None
+    return None
 
 
 def _normalized_success(
@@ -624,6 +1374,158 @@ def _query_error_response(result: QueryResult) -> Optional[JSONResponse]:
     )
 
 
+def _normalized_sector_membership_response(result: SectorMembershipResult) -> JSONResponse:
+    payload = _normalized_payload(
+        "local_gateway",
+        "stock_sector_memberships",
+        result.rows,
+        cache_mode=result.cache_mode,
+        cache_hit=result.cache_hit,
+    )
+    payload["meta"]["coverage"] = result.coverage
+    payload["meta"]["status"] = result.status
+    if result.warning is not None:
+        payload["meta"]["warning"] = result.warning
+    return JSONResponse(payload)
+
+
+def _normalized_fund_data_response(endpoint: str, result: FundDataResult) -> JSONResponse:
+    payload = _normalized_payload(
+        "local_gateway",
+        endpoint,
+        result.rows,
+        cache_mode=result.cache_mode,
+        cache_hit=result.cache_hit,
+    )
+    payload["meta"]["coverage"] = result.coverage
+    payload["meta"]["status"] = result.status
+    if result.warning is not None:
+        payload["meta"]["warning"] = result.warning
+    return JSONResponse(payload)
+
+
+def _normalized_source_event_response(endpoint: str, result: SourceEventResult) -> JSONResponse:
+    payload = _normalized_payload(
+        "local_gateway",
+        endpoint,
+        result.rows,
+        cache_mode=result.cache_mode,
+        cache_hit=result.cache_hit,
+    )
+    payload["meta"].update(result.metadata)
+    payload["meta"]["cache_hit"] = result.cache_hit
+    payload["meta"]["status"] = result.status
+    if result.warning is not None:
+        payload["meta"]["warning"] = result.warning
+    return JSONResponse(payload)
+
+
+def _normalized_narrative_source_event_response(
+    endpoint: str,
+    result: SourceEventResult,
+    *,
+    requested_symbols: list[str],
+    query: str,
+) -> JSONResponse:
+    rows = [
+        _narrative_source_event_row(
+            row,
+            metadata=result.metadata,
+            requested_symbols=requested_symbols,
+            query=query,
+        )
+        for row in result.rows
+    ]
+    payload = _normalized_payload(
+        "gateway",
+        endpoint,
+        rows,
+        cache_mode=result.cache_mode,
+        cache_hit=result.cache_hit,
+    )
+    payload["meta"].update(result.metadata)
+    payload["meta"]["provider"] = "gateway"
+    payload["meta"]["endpoint"] = endpoint
+    payload["meta"]["cache_hit"] = result.cache_hit
+    payload["meta"]["status"] = result.status
+    if result.warning is not None:
+        payload["meta"]["warning"] = result.warning
+    return JSONResponse(payload)
+
+
+def _narrative_source_event_row(
+    row: dict[str, Any],
+    *,
+    metadata: dict[str, Any],
+    requested_symbols: list[str],
+    query: str,
+) -> dict[str, Any]:
+    degradation_events = row.get("degradation_warnings")
+    if not isinstance(degradation_events, list):
+        degradation_events = metadata.get("degradation_events")
+    if not isinstance(degradation_events, list):
+        degradation_events = []
+    stock_codes = _narrative_stock_codes(row, requested_symbols=requested_symbols)
+    return {
+        "source_event_id": str(row.get("source_event_id") or ""),
+        "source_type": _narrative_source_type(str(row.get("source_type") or "")),
+        "source_provider": str(row.get("provider") or row.get("source_id") or "local_gateway"),
+        "source_url": str(row.get("source_url") or ""),
+        "title": str(row.get("title") or ""),
+        "event_time": str(row.get("event_time") or row.get("published_at") or row.get("fetched_at") or ""),
+        "fetched_at": str(row.get("fetched_at") or metadata.get("generated_at") or ""),
+        "trust_tier": str(row.get("trust_tier") or metadata.get("trust_tier") or "candidate_untrusted"),
+        "source_quality": _source_quality_label(metadata),
+        "license_scope": str(row.get("license_scope") or metadata.get("license_scope") or "unspecified"),
+        "retention_policy": str(row.get("retention_policy") or metadata.get("retention_policy") or "metadata_only"),
+        "metadata_only": bool(row.get("metadata_only", True)),
+        "degradation_events": degradation_events,
+        "summary": str(row.get("summary") or ""),
+        "stock_codes": stock_codes,
+        "narrative_hints": [query] if query else [],
+        "evidence_claims": [str(row.get("summary") or row.get("title") or "")],
+        "provider_metadata": {
+            "source_id": row.get("source_id"),
+            "provider_item_id": row.get("provider_item_id"),
+            "entity_type": row.get("entity_type"),
+            "entity_id": row.get("entity_id"),
+            "event_type": row.get("event_type"),
+            "market": row.get("market"),
+        },
+        "source_document_id": str(row.get("provider_item_id") or ""),
+        "source_document_title": str(row.get("title") or ""),
+        "source_document_url": str(row.get("source_url") or ""),
+        "excerpt": str(row.get("summary") or ""),
+    }
+
+
+def _source_quality_label(metadata: dict[str, Any]) -> str:
+    source_quality = metadata.get("source_quality")
+    if isinstance(source_quality, dict):
+        return str(source_quality.get("label") or source_quality.get("parser_health") or "unspecified")
+    return str(source_quality or "unspecified")
+
+
+def _narrative_source_type(source_type: str) -> str:
+    aliases = {
+        "official_filing": "filing",
+        "official_disclosure": "announcement",
+        "public_news": "news",
+        "social_heat": "social",
+    }
+    return aliases.get(source_type, source_type or "manual")
+
+
+def _narrative_stock_codes(row: dict[str, Any], *, requested_symbols: list[str]) -> list[str]:
+    if requested_symbols:
+        return [_base_symbol(symbol) for symbol in requested_symbols]
+    entity_type = str(row.get("entity_type") or "")
+    entity_id = str(row.get("entity_id") or "")
+    if entity_type in {"symbol", "company", "topic"} and entity_id:
+        return [_base_symbol(entity_id)]
+    return []
+
+
 def _normalized_exception(error: Exception) -> JSONResponse:
     if isinstance(error, GatewayError):
         return _normalized_error(error.code.value, error.message, _error_status(error))
@@ -662,6 +1564,128 @@ def _symbols(payload: dict[str, Any]) -> list[str]:
     return symbols
 
 
+def _sector_types(value: Any) -> list[str]:
+    if value in (None, ""):
+        return ["concept"]
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise ValueError("sector_types must be a list or comma-separated string")
+    sector_types = []
+    seen = set()
+    for item in values:
+        sector_type = str(item).strip().lower()
+        if not sector_type or sector_type in seen:
+            continue
+        seen.add(sector_type)
+        sector_types.append(sector_type)
+    if not sector_types:
+        raise ValueError("sector_types must not be empty")
+    return sector_types
+
+
+def _fund_code(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        raise ValueError("fund_code is required")
+    base = text.split(".", 1)[0]
+    if not base or not base.isalnum():
+        raise ValueError("fund_code is invalid")
+    return base
+
+
+def _source_event_timeouts(timeout_seconds: Any, upstream_timeout_seconds: Any) -> tuple[float, float]:
+    request_timeout_seconds = _optional_positive_float(
+        timeout_seconds,
+        default=12.0,
+        maximum=15.0,
+        field_name="timeout_seconds",
+    )
+    resolved_upstream_timeout_seconds = _optional_positive_float(
+        upstream_timeout_seconds,
+        default=5.0,
+        maximum=request_timeout_seconds,
+        field_name="upstream_timeout_seconds",
+    )
+    return request_timeout_seconds, resolved_upstream_timeout_seconds
+
+
+def _source_event_date_range(start_date: str, end_date: str) -> tuple[str, str]:
+    today = datetime.now(timezone.utc).date()
+    resolved_end = _compact_date(end_date) if end_date.strip() else today.strftime("%Y%m%d")
+    resolved_start = (
+        _compact_date(start_date)
+        if start_date.strip()
+        else (today - timedelta(days=30)).strftime("%Y%m%d")
+    )
+    return _iso_date(resolved_start), _iso_date(resolved_end)
+
+
+def _source_event_datetime_range(start_datetime: str, end_datetime: str) -> tuple[str, str]:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    resolved_end = end_datetime.strip() or now.strftime("%Y-%m-%d %H:%M:%S")
+    resolved_start = start_datetime.strip() or (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    return resolved_start, resolved_end
+
+
+def _optional_string_list(value: Any) -> list[str] | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise ValueError("src_values must be a list or comma-separated string")
+    src_values = [str(item).strip() for item in values if str(item).strip()]
+    return src_values or None
+
+
+def _optional_symbols(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise ValueError("symbols must be a list or comma-separated string")
+    return [str(item).strip().upper() for item in values if str(item).strip()]
+
+
+def _first_base_symbol(symbols: list[str]) -> str:
+    return _base_symbol(symbols[0]) if symbols else ""
+
+
+def _base_symbol(symbol: str) -> str:
+    return str(symbol or "").strip().upper().split(".", 1)[0]
+
+
+def _cik_from_symbols(symbols: list[str]) -> str:
+    symbol_to_cik = {
+        "AAPL": "0000320193",
+        "MSFT": "0000789019",
+        "NVDA": "0001045810",
+        "TSLA": "0001318605",
+        "GOOGL": "0001652044",
+        "GOOG": "0001652044",
+        "META": "0001326801",
+        "AMZN": "0001018724",
+    }
+    if not symbols:
+        return ""
+    symbol = _base_symbol(symbols[0])
+    if symbol.isdigit():
+        return symbol
+    return symbol_to_cik.get(symbol, "")
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _compact_date(value: Any) -> str:
     text = str(value).strip()
     if len(text) == 10 and text[4] == "-" and text[7] == "-":
@@ -693,6 +1717,18 @@ def _optional_positive_int(value: Any, *, default: int, maximum: int) -> int:
         raise ValueError("limit must be an integer") from error
     if parsed < 0:
         raise ValueError("limit must be non-negative")
+    return min(parsed, maximum)
+
+
+def _optional_positive_float(value: Any, *, default: float, maximum: float, field_name: str) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field_name} must be a number") from error
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be positive")
     return min(parsed, maximum)
 
 

@@ -1,5 +1,27 @@
 # FNI Narrative Source + Lightweight Lakehouse Capability Change Request - 2026-06-01
 
+Archive status: implemented on 2026-06-01.
+
+Implementation evidence:
+
+- Gateway routes:
+  - `GET /api/v1/market-data/source-events/official-filings`
+  - `GET /api/v1/market-data/source-events/official-disclosures`
+  - `GET /api/v1/market-data/source-events/news-context`
+  - `GET /api/v1/market-data/source-events/social-heat`
+  - `POST /api/v1/market-data/source-events/news-permission-smoke`
+- Provider adapters: SEC EDGAR submissions API and Stocktwits symbol stream
+  adapter; Tushare news and AkShare announcement metadata are consumed through
+  existing gateway providers.
+- Local source lakehouse: SQLite tables for source registry, fetch runs,
+  documents, events, evidence spans, entity mentions, resolved entities,
+  quality snapshots, and blob manifests.
+- Local runtime: `docker-compose.source-lakehouse.yml` profile for Postgres and
+  MinIO, documented in `docs/runbooks/source-lakehouse-runtime.md`.
+- Validation: fake-provider API tests cover trust labels, cache hits, disabled
+  social heat, enabled heat-signal rows, permission smoke, and lakehouse table
+  creation; provider tests cover SEC EDGAR and Stocktwits mapping.
+
 Requester: Fund Narrative Intelligence
 
 Target project: `stock-data-gateway`
@@ -265,4 +287,3 @@ items and should be treated as gateway capability requests instead:
 - `MIK-246`: source storage schema/repository.
 - `MIK-247`: raw zone/blob manifest.
 - `MIK-249`: Docker local source lakehouse runtime.
-
