@@ -1,0 +1,101 @@
+{
+  "artifacts": {
+    "html": "outputs/narrative_source_acceptance/current/narrative_source_acceptance.html",
+    "json": "outputs/narrative_source_acceptance/current/narrative_source_acceptance.json"
+  },
+  "base_url": "http://127.0.0.1:8700",
+  "enable_social_heat_live": false,
+  "fni_direct_adapter_cleanup": {
+    "all_gateway_unavailable": false,
+    "ready": true,
+    "reason": "Gateway narrative source acceptance is passed or explicitly degraded."
+  },
+  "generated_at": "2026-06-05T05:43:14+00:00",
+  "ok": true,
+  "source_checks": [
+    {
+      "cache_hit": true,
+      "degradation_reason": null,
+      "failable_for_fni_cleanup": false,
+      "http_status": 200,
+      "license_scope": "public_filing",
+      "provider": "sec_edgar",
+      "retention_policy": "metadata_and_raw_payload",
+      "route": "/api/v1/market-data/narrative/source-events/official-filings",
+      "row_count": 1,
+      "source_kind": "official_filings",
+      "source_quality": "official_metadata",
+      "status": "passed",
+      "trust_tier": "trusted_fact",
+      "warning": null
+    },
+    {
+      "cache_hit": false,
+      "degradation_reason": null,
+      "failable_for_fni_cleanup": false,
+      "http_status": 200,
+      "license_scope": "public_disclosure_metadata",
+      "provider": "cninfo",
+      "retention_policy": "metadata_only",
+      "route": "/api/v1/market-data/narrative/source-events/official-disclosures",
+      "row_count": 1,
+      "source_kind": "official_disclosures",
+      "source_quality": "official_metadata",
+      "status": "passed",
+      "trust_tier": "trusted_fact",
+      "warning": null
+    },
+    {
+      "cache_hit": false,
+      "degradation_reason": null,
+      "failable_for_fni_cleanup": false,
+      "http_status": 200,
+      "license_scope": "context_only",
+      "provider": "tushare",
+      "retention_policy": "metadata_only",
+      "route": "/api/v1/market-data/narrative/source-events/news-context",
+      "row_count": 1,
+      "source_kind": "news_context",
+      "source_quality": "public_context",
+      "status": "passed",
+      "trust_tier": "context_only",
+      "warning": null
+    },
+    {
+      "cache_hit": false,
+      "degradation_reason": "SOCIAL_SOURCE_DISABLED",
+      "failable_for_fni_cleanup": false,
+      "http_status": 200,
+      "license_scope": "public_context",
+      "provider": "stocktwits",
+      "retention_policy": "metadata_only",
+      "route": "/api/v1/market-data/narrative/source-events/social-heat",
+      "row_count": 0,
+      "source_kind": "social_heat_disabled",
+      "source_quality": "community_heat",
+      "status": "degraded",
+      "trust_tier": "heat_signal_only",
+      "warning": {
+        "code": "SOCIAL_SOURCE_DISABLED",
+        "message": "Social heat sources are disabled by default."
+      }
+    },
+    {
+      "cache_hit": false,
+      "degradation_reason": null,
+      "failable_for_fni_cleanup": false,
+      "http_status": 200,
+      "license_scope": "diagnostic_only",
+      "provider": "tushare",
+      "retention_policy": "no_payload_retention",
+      "route": "/api/v1/market-data/source-events/news-permission-smoke",
+      "row_count": 6,
+      "source_kind": "news_permission_smoke",
+      "source_quality": "permission_probe",
+      "status": "passed",
+      "trust_tier": "diagnostic",
+      "warning": null
+    }
+  ],
+  "status": "degraded"
+}

@@ -29,11 +29,14 @@ from stock_data_gateway.policies.registry import create_default_policy_registry
 from stock_data_gateway.providers.akshare.adapter import AkshareProvider
 from stock_data_gateway.providers.cninfo.adapter import CninfoProvider
 from stock_data_gateway.providers.eastmoney.adapter import EastmoneyProvider
+from stock_data_gateway.providers.feed.adapter import FeedProvider
+from stock_data_gateway.providers.gdelt.adapter import GdeltProvider
 from stock_data_gateway.providers.sec_edgar.adapter import SecEdgarProvider
 from stock_data_gateway.providers.stocktwits.adapter import StocktwitsProvider
 from stock_data_gateway.providers.tushare.adapter import TushareProvider
 from stock_data_gateway.providers.tushare.client import TushareMarketDataClient
 from stock_data_gateway.sector_memberships import SectorMembershipIndex, SectorMembershipResult
+from stock_data_gateway.source_event_capabilities import narrative_source_capabilities
 from stock_data_gateway.source_events import SourceEventResult, SourceEventService
 
 JSON_BODY = Body(default_factory=dict)
@@ -502,6 +505,40 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
         except (ValueError, GatewayError) as error:
             return _normalized_exception(error)
 
+    @app.get("/api/v1/market-data/source-events/open-news-index")
+    def source_events_open_news_index(
+        query: str = Query(default="markets"),
+        start_datetime: str = Query(default=""),
+        end_datetime: str = Query(default=""),
+        limit: str = Query(default="20"),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_start_datetime, resolved_end_datetime = _source_event_datetime_range(
+                start_datetime,
+                end_datetime,
+            )
+            resolved_limit = _optional_positive_int(limit, default=20, maximum=50)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                timeout_seconds,
+                upstream_timeout_seconds,
+            )
+            with _fetch_slot():
+                result = _source_event_service(app).open_news_index(
+                    query=query.strip() or "markets",
+                    start_datetime=resolved_start_datetime,
+                    end_datetime=resolved_end_datetime,
+                    limit=resolved_limit,
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_source_event_response("open_news_index", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
     @app.get("/api/v1/market-data/source-events/social-heat")
     def source_events_social_heat(
         symbol: str = Query(default="AAPL"),
@@ -554,6 +591,166 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
                     upstream_timeout_seconds=upstream_timeout_seconds,
                 )
             return _normalized_source_event_response("news_permission_smoke", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/source-events/capabilities")
+    def source_events_capabilities() -> JSONResponse:
+        return JSONResponse(
+            _normalized_payload(
+                "local_gateway",
+                "source_event_capabilities",
+                narrative_source_capabilities(),
+                cache_mode="none",
+                cache_hit=False,
+            )
+        )
+
+    @app.get("/api/v1/market-data/source-events/official-source-registry")
+    def source_events_official_source_registry(
+        source_kind: str = Query(default=""),
+        include_disabled: bool = Query(default=True),
+    ) -> JSONResponse:
+        try:
+            result = _source_event_service(app).official_source_registry(
+                source_kind=source_kind.strip(),
+                include_disabled=include_disabled,
+            )
+            return _normalized_source_event_response("official_source_registry", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/source-events/official-sources")
+    def source_events_official_sources(
+        source_id: str = Query(default=""),
+        source_kind: str = Query(default=""),
+        limit: str = Query(default="20"),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_limit = _optional_positive_int(limit, default=20, maximum=100)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                timeout_seconds,
+                upstream_timeout_seconds,
+            )
+            with _fetch_slot():
+                result = _source_event_service(app).official_source_events(
+                    source_id=source_id.strip(),
+                    source_kind=source_kind.strip(),
+                    limit=resolved_limit,
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_source_event_response("official_sources", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/source-events/industry-media")
+    def source_events_industry_media(
+        source_id: str = Query(default=""),
+        limit: str = Query(default="20"),
+        force_refresh: bool = Query(default=False),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_limit = _optional_positive_int(limit, default=20, maximum=100)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                timeout_seconds,
+                upstream_timeout_seconds,
+            )
+            with _fetch_slot():
+                result = _source_event_service(app).industry_media_events(
+                    source_id=source_id.strip(),
+                    limit=resolved_limit,
+                    force_refresh=force_refresh,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            return _normalized_source_event_response("industry_media", result)
+        except (ValueError, GatewayError) as error:
+            return _normalized_exception(error)
+
+    @app.get("/api/v1/market-data/narrative/source-events")
+    def narrative_source_events(
+        source_kind: str = Query(default=""),
+        source_provider: str = Query(default=""),
+        symbol: str = Query(default=""),
+        entity_id: str = Query(default=""),
+        keyword: str = Query(default=""),
+        start_time: str = Query(default=""),
+        end_time: str = Query(default=""),
+        trust_tier: str = Query(default=""),
+        limit: str = Query(default="20"),
+        cursor: str = Query(default=""),
+        timeout_seconds: str = Query(default=""),
+        upstream_timeout_seconds: str = Query(default=""),
+    ) -> JSONResponse:
+        try:
+            resolved_limit = _optional_positive_int(limit, default=20, maximum=100)
+            offset = _cursor_offset(cursor)
+            request_timeout_seconds, resolved_upstream_timeout_seconds = _source_event_timeouts(
+                timeout_seconds,
+                upstream_timeout_seconds,
+            )
+            source_kinds = _unified_source_kinds(source_kind)
+            symbols = _optional_symbols(symbol)
+            with _fetch_slot():
+                collected = _collect_narrative_source_events(
+                    app=app,
+                    source_kinds=source_kinds,
+                    symbols=symbols,
+                    query=keyword,
+                    fetch_limit=min(resolved_limit + offset + 1, 100),
+                    start_time=start_time,
+                    end_time=end_time,
+                    request_timeout_seconds=request_timeout_seconds,
+                    upstream_timeout_seconds=resolved_upstream_timeout_seconds,
+                )
+            filtered_rows = _filter_narrative_source_rows(
+                collected["rows"],
+                source_provider=source_provider,
+                entity_id=entity_id,
+                keyword=keyword,
+                start_time=start_time,
+                end_time=end_time,
+                trust_tier=trust_tier,
+                symbols=symbols,
+            )
+            page_rows = filtered_rows[offset : offset + resolved_limit]
+            payload = _normalized_payload(
+                "gateway",
+                "narrative_source_events",
+                page_rows,
+                cache_mode=collected["cache_mode"],
+                cache_hit=collected["cache_hit"],
+            )
+            payload["meta"].update(
+                {
+                    "provider_attempts": collected["provider_attempts"],
+                    "degradation_events": collected["degradation_events"],
+                    "pagination": _pagination(
+                        cursor=cursor,
+                        offset=offset,
+                        limit=resolved_limit,
+                        total=len(filtered_rows),
+                    ),
+                    "source_kinds": source_kinds,
+                    "source_quality": collected["source_quality"],
+                }
+            )
+            if collected["all_sources_degraded"] and not collected["rows"]:
+                payload["meta"]["status"] = "degraded"
+                payload["meta"]["warning"] = {
+                    "code": "ALL_SOURCES_DEGRADED",
+                    "message": "All requested source-event providers returned degraded results.",
+                }
+            elif collected["any_source_degraded"]:
+                payload["meta"]["status"] = "degraded"
+            return JSONResponse(payload)
         except (ValueError, GatewayError) as error:
             return _normalized_exception(error)
 
@@ -1143,6 +1340,8 @@ def create_default_gateway(settings: Optional[Settings] = None) -> ReadThroughQu
             "akshare": AkshareProvider(),
             "cninfo": CninfoProvider(),
             "sec_edgar": SecEdgarProvider(),
+            "official_feed": FeedProvider(),
+            "gdelt": GdeltProvider(),
             "stocktwits": StocktwitsProvider(),
         },
         policies,
@@ -1489,8 +1688,15 @@ def _narrative_source_event_row(
             "provider_item_id": row.get("provider_item_id"),
             "entity_type": row.get("entity_type"),
             "entity_id": row.get("entity_id"),
+            "ticker": row.get("ticker"),
+            "company_name": row.get("company_name"),
             "event_type": row.get("event_type"),
             "market": row.get("market"),
+            "source_domain": row.get("source_domain"),
+            "language": row.get("language"),
+            "governance": row.get("governance") or metadata.get("governance") or {},
+            "freshness": row.get("freshness") or {},
+            "extraction": row.get("extraction") or {},
         },
         "source_document_id": str(row.get("provider_item_id") or ""),
         "source_document_title": str(row.get("title") or ""),
@@ -1510,6 +1716,9 @@ def _narrative_source_type(source_type: str) -> str:
     aliases = {
         "official_filing": "filing",
         "official_disclosure": "announcement",
+        "official_source": "official",
+        "open_news_index": "news",
+        "public_industry_media": "news",
         "public_news": "news",
         "social_heat": "social",
     }
@@ -1524,6 +1733,239 @@ def _narrative_stock_codes(row: dict[str, Any], *, requested_symbols: list[str])
     if entity_type in {"symbol", "company", "topic"} and entity_id:
         return [_base_symbol(entity_id)]
     return []
+
+
+def _unified_source_kinds(source_kind: str) -> list[str]:
+    allowed = {
+        "official_filings",
+        "official_disclosures",
+        "official_sources",
+        "industry_media",
+        "open_news_index",
+        "news_context",
+        "social_heat",
+    }
+    if not source_kind.strip():
+        return ["official_filings", "official_disclosures", "official_sources", "news_context", "social_heat"]
+    values = [item.strip() for item in source_kind.split(",") if item.strip()]
+    invalid = [value for value in values if value not in allowed]
+    if invalid:
+        raise ValueError(f"unsupported source_kind: {', '.join(invalid)}")
+    return values
+
+
+def _collect_narrative_source_events(
+    *,
+    app: FastAPI,
+    source_kinds: list[str],
+    symbols: list[str],
+    query: str,
+    fetch_limit: int,
+    start_time: str,
+    end_time: str,
+    request_timeout_seconds: float,
+    upstream_timeout_seconds: float,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    provider_attempts: list[dict[str, Any]] = []
+    degradation_events: list[dict[str, Any]] = []
+    results: list[SourceEventResult] = []
+    for source_kind in source_kinds:
+        result = _fetch_unified_source_kind(
+            app=app,
+            source_kind=source_kind,
+            symbols=symbols,
+            query=query,
+            fetch_limit=fetch_limit,
+            start_time=start_time,
+            end_time=end_time,
+            request_timeout_seconds=request_timeout_seconds,
+            upstream_timeout_seconds=upstream_timeout_seconds,
+        )
+        results.append(result)
+        provider_attempts.extend(
+            {"source_kind": source_kind, **attempt}
+            for attempt in result.metadata.get("provider_attempts", [])
+            if isinstance(attempt, dict)
+        )
+        degradation_events.extend(
+            {"source_kind": source_kind, **event}
+            for event in result.metadata.get("degradation_events", [])
+            if isinstance(event, dict)
+        )
+        for row in result.rows:
+            narrative_row = _narrative_source_event_row(
+                row,
+                metadata=result.metadata,
+                requested_symbols=symbols,
+                query=query,
+            )
+            narrative_row["provider_metadata"] = {
+                **narrative_row["provider_metadata"],
+                "source_kind": source_kind,
+            }
+            rows.append(narrative_row)
+    return {
+        "rows": rows,
+        "provider_attempts": provider_attempts,
+        "degradation_events": degradation_events,
+        "cache_hit": bool(results and all(result.cache_hit for result in results)),
+        "cache_mode": "cache" if results and all(result.cache_hit for result in results) else "mixed",
+        "any_source_degraded": any(result.status == "degraded" for result in results),
+        "all_sources_degraded": bool(results) and all(result.status == "degraded" for result in results),
+        "source_quality": "mixed",
+    }
+
+
+def _fetch_unified_source_kind(
+    *,
+    app: FastAPI,
+    source_kind: str,
+    symbols: list[str],
+    query: str,
+    fetch_limit: int,
+    start_time: str,
+    end_time: str,
+    request_timeout_seconds: float,
+    upstream_timeout_seconds: float,
+) -> SourceEventResult:
+    service = _source_event_service(app)
+    if source_kind == "official_filings":
+        return service.official_filings(
+            cik=_cik_from_symbols(symbols) or "0000320193",
+            limit=fetch_limit,
+            request_timeout_seconds=request_timeout_seconds,
+            upstream_timeout_seconds=upstream_timeout_seconds,
+        )
+    if source_kind == "official_disclosures":
+        start_date, end_date = _source_event_date_range(_date_part(start_time), _date_part(end_time))
+        return service.official_disclosures(
+            symbol=_first_base_symbol(symbols) or "000001",
+            start_date=start_date,
+            end_date=end_date,
+            limit=fetch_limit,
+            request_timeout_seconds=request_timeout_seconds,
+            upstream_timeout_seconds=upstream_timeout_seconds,
+        )
+    if source_kind == "official_sources":
+        return service.official_source_events(
+            limit=fetch_limit,
+            request_timeout_seconds=request_timeout_seconds,
+            upstream_timeout_seconds=upstream_timeout_seconds,
+        )
+    if source_kind == "industry_media":
+        return service.industry_media_events(
+            limit=fetch_limit,
+            request_timeout_seconds=request_timeout_seconds,
+            upstream_timeout_seconds=upstream_timeout_seconds,
+        )
+    if source_kind == "open_news_index":
+        start_datetime, end_datetime = _source_event_datetime_range(start_time, end_time)
+        return service.open_news_index(
+            query=query or "markets",
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            limit=min(fetch_limit, 50),
+            request_timeout_seconds=request_timeout_seconds,
+            upstream_timeout_seconds=upstream_timeout_seconds,
+        )
+    if source_kind == "news_context":
+        start_datetime, end_datetime = _source_event_datetime_range(start_time, end_time)
+        return service.news_context(
+            src="sina",
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            query=query,
+            limit=fetch_limit,
+            request_timeout_seconds=request_timeout_seconds,
+            upstream_timeout_seconds=upstream_timeout_seconds,
+        )
+    return service.social_heat(
+        symbol=_first_base_symbol(symbols) or "AAPL",
+        limit=min(fetch_limit, 30),
+        enabled=_truthy_env("GATEWAY_SOURCE_EVENTS_ENABLE_SOCIAL_HEAT"),
+        request_timeout_seconds=request_timeout_seconds,
+        upstream_timeout_seconds=upstream_timeout_seconds,
+    )
+
+
+def _filter_narrative_source_rows(
+    rows: list[dict[str, Any]],
+    *,
+    source_provider: str,
+    entity_id: str,
+    keyword: str,
+    start_time: str,
+    end_time: str,
+    trust_tier: str,
+    symbols: list[str],
+) -> list[dict[str, Any]]:
+    filtered = rows
+    if source_provider.strip():
+        provider = source_provider.strip().lower()
+        filtered = [row for row in filtered if str(row.get("source_provider") or "").lower() == provider]
+    if entity_id.strip():
+        requested_entity = entity_id.strip().upper()
+        filtered = [
+            row
+            for row in filtered
+            if str(row.get("provider_metadata", {}).get("entity_id") or "").upper() == requested_entity
+        ]
+    if keyword.strip():
+        needle = keyword.strip().lower()
+        filtered = [
+            row
+            for row in filtered
+            if needle in f"{row.get('title', '')} {row.get('summary', '')} {row.get('excerpt', '')}".lower()
+        ]
+    if trust_tier.strip():
+        tier = trust_tier.strip()
+        filtered = [row for row in filtered if row.get("trust_tier") == tier]
+    if symbols:
+        requested_symbols = {_base_symbol(symbol) for symbol in symbols}
+        filtered = [
+            row for row in filtered if requested_symbols.intersection(set(row.get("stock_codes") or []))
+        ]
+    if start_time.strip() or end_time.strip():
+        filtered = [
+            row
+            for row in filtered
+            if _time_in_range(str(row.get("event_time") or ""), start_time=start_time, end_time=end_time)
+        ]
+    return filtered
+
+
+def _pagination(*, cursor: str, offset: int, limit: int, total: int) -> dict[str, Any]:
+    next_offset = offset + limit
+    return {
+        "cursor": cursor or "0",
+        "next_cursor": str(next_offset) if next_offset < total else None,
+        "limit": limit,
+        "total": total,
+        "has_more": next_offset < total,
+    }
+
+
+def _cursor_offset(cursor: str) -> int:
+    if not cursor.strip():
+        return 0
+    try:
+        parsed = int(cursor)
+    except ValueError as error:
+        raise ValueError("cursor must be a non-negative integer offset") from error
+    if parsed < 0:
+        raise ValueError("cursor must be a non-negative integer offset")
+    return parsed
+
+
+def _date_part(value: str) -> str:
+    return value[:10] if value.strip() else ""
+
+
+def _time_in_range(value: str, *, start_time: str, end_time: str) -> bool:
+    if start_time.strip() and value < start_time.strip():
+        return False
+    return not (end_time.strip() and value > end_time.strip())
 
 
 def _normalized_exception(error: Exception) -> JSONResponse:

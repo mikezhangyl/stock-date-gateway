@@ -14,11 +14,51 @@ from queue import Queue
 from typing import Any
 
 from stock_data_gateway.core.errors import GatewayError, GatewayErrorCode
+from stock_data_gateway.core.redaction import sanitize_error_message
 from stock_data_gateway.providers.base import ExternalDataProvider
+from stock_data_gateway.source_extraction import metadata_only_extraction_status
+from stock_data_gateway.source_governance import SourceRequestPolicy, default_source_governance, governance_metadata
+from stock_data_gateway.source_registry import (
+    OFFICIAL_SOURCE_SEEDS,
+    OfficialSourceDefinition,
+    official_source_row,
+    official_source_seed_rows,
+)
 
 _PARSER_VERSION = "source-events.v1"
 _TUSHARE_NEWS_FIELDS = "datetime,title,content,channels"
 _DEFAULT_SMOKE_SRCS = ["sina", "wallstreetcn", "10jqka", "eastmoney", "yicai", "cls"]
+_STALE_AFTER_SECONDS = 86400
+
+_SOURCE_REGISTRY_COLUMNS = {
+    "permission_status": "TEXT NOT NULL DEFAULT 'unknown'",
+    "robots_tos_status": "TEXT NOT NULL DEFAULT 'unknown'",
+    "redistribution_policy": "TEXT NOT NULL DEFAULT 'unspecified'",
+    "anti_bot_risk": "TEXT NOT NULL DEFAULT 'unknown'",
+    "owner_service": "TEXT NOT NULL DEFAULT 'stock-data-gateway'",
+    "parser_version": "TEXT NOT NULL DEFAULT 'unknown'",
+    "request_policy_json": "TEXT NOT NULL DEFAULT '{}'",
+    "source_kind": "TEXT",
+    "country": "TEXT",
+    "market": "TEXT",
+    "domain": "TEXT",
+    "base_url": "TEXT",
+    "feed_url": "TEXT",
+    "parser_strategy": "TEXT",
+    "enabled": "INTEGER NOT NULL DEFAULT 1",
+    "pacing_seconds": "REAL",
+    "allowed_fields_json": "TEXT NOT NULL DEFAULT '[]'",
+}
+_SOURCE_EVENT_LEDGER_COLUMNS = {
+    "dedupe_key": "TEXT",
+    "first_seen_at": "TEXT",
+    "last_seen_at": "TEXT",
+    "freshness_state": "TEXT",
+    "content_hash": "TEXT",
+    "metadata_hash": "TEXT",
+    "duplicate_of": "TEXT",
+    "parser_version": "TEXT",
+}
 
 
 @dataclass(frozen=True)
@@ -96,7 +136,7 @@ class SourceEventService:
             return _degraded([], descriptor, attempts, _warning(error, "Unable to fetch official filings."))
 
         attempts.append({"provider": "sec_edgar", "status": "ok"})
-        self._write_source_events(route, request_key, rows, descriptor)
+        rows = self._write_source_events(route, request_key, rows, descriptor)
         self._write_fetch_run(route, request_key, "sec_edgar", "ok", started_at, len(rows), None)
         return _success(rows, descriptor, attempts, cache_hit=False)
 
@@ -164,7 +204,7 @@ class SourceEventService:
             return _degraded([], descriptor, attempts, _warning(error, "Unable to fetch official disclosures."))
 
         attempts.append({"provider": provider_name, "status": "ok"})
-        self._write_source_events(route, request_key, rows, descriptor)
+        rows = self._write_source_events(route, request_key, rows, descriptor)
         self._write_fetch_run(route, request_key, provider_name, "ok", started_at, len(rows), None)
         return _success(rows, descriptor, attempts, cache_hit=False)
 
@@ -202,6 +242,7 @@ class SourceEventService:
             quality_label="public_context",
             metadata_only=True,
             skipped_noise_count=0,
+            permission_status="credential_required",
         )
         cached = self._read_cached_events(route, request_key, limit=limit)
         if cached and not force_refresh:
@@ -231,8 +272,77 @@ class SourceEventService:
             return _degraded([], descriptor, attempts, _warning(error, "Unable to fetch news context."))
 
         attempts.append({"provider": "tushare", "status": "ok"})
-        self._write_source_events(route, request_key, rows, descriptor)
+        rows = self._write_source_events(route, request_key, rows, descriptor)
         self._write_fetch_run(route, request_key, "tushare", "ok", started_at, len(rows), None)
+        return _success(rows, descriptor, attempts, cache_hit=False)
+
+    def open_news_index(
+        self,
+        *,
+        query: str,
+        start_datetime: str,
+        end_datetime: str,
+        limit: int,
+        force_refresh: bool = False,
+        request_timeout_seconds: float = 12.0,
+        upstream_timeout_seconds: float = 5.0,
+    ) -> SourceEventResult:
+        route = "open_news_index"
+        request_key = _request_key(
+            route,
+            {
+                "query": query,
+                "start_datetime": start_datetime,
+                "end_datetime": end_datetime,
+                "limit": limit,
+            },
+        )
+        descriptor = _source_descriptor(
+            source=route,
+            source_id="gdelt_doc",
+            trust_tier="context_only",
+            license_scope="public_news_index_metadata",
+            retention_policy="metadata_only",
+            raw_storage_policy="no_full_text_retention",
+            quality_label="open_news_index_experimental",
+            metadata_only=True,
+            request_policy=SourceRequestPolicy(max_concurrency=1, timeout_seconds=12.0, per_domain_pacing_seconds=5.0),
+        )
+        cached = self._read_cached_events(route, request_key, limit=limit)
+        if cached and not force_refresh:
+            return _success(cached, descriptor, [{"provider": "cache", "status": "hit"}], cache_hit=True)
+
+        attempts = [{"provider": "cache", "status": "miss" if not cached else "bypass"}]
+        deadline_at = time.monotonic() + request_timeout_seconds
+        started_at = _utc_now()
+        try:
+            provider = _provider(self._providers, "gdelt")
+            response = _run_with_timeout(
+                lambda: provider.fetch(
+                    "doc_articles",
+                    {
+                        "query": query,
+                        "start_datetime": start_datetime,
+                        "end_datetime": end_datetime,
+                        "limit": limit,
+                    },
+                    fields=None,
+                ),
+                timeout_seconds=min(upstream_timeout_seconds, _remaining_seconds(deadline_at)),
+                timeout_message="Open news index request timed out.",
+            )
+            rows = [_open_news_index_event(row, query=query) for row in response.rows()]
+            rows = [row for row in rows if row.get("source_event_id")][:limit]
+            if not rows:
+                raise GatewayError(GatewayErrorCode.EMPTY_DATA, "Open news index returned no rows.")
+        except GatewayError as error:
+            attempts.append(_failed_attempt("gdelt", error))
+            self._write_fetch_run(route, request_key, "gdelt", "degraded", started_at, 0, error)
+            return _degraded([], descriptor, attempts, _warning(error, "Unable to fetch open news index."))
+
+        attempts.append({"provider": "gdelt", "status": "ok"})
+        rows = self._write_source_events(route, request_key, rows, descriptor)
+        self._write_fetch_run(route, request_key, "gdelt", "ok", started_at, len(rows), None)
         return _success(rows, descriptor, attempts, cache_hit=False)
 
     def social_heat(
@@ -288,9 +398,254 @@ class SourceEventService:
             return _degraded([], descriptor, attempts, _warning(error, "Unable to fetch social heat."))
 
         attempts.append({"provider": "stocktwits", "status": "ok"})
-        self._write_source_events(route, request_key, rows, descriptor)
+        rows = self._write_source_events(route, request_key, rows, descriptor)
         self._write_fetch_run(route, request_key, "stocktwits", "ok", started_at, len(rows), None)
         return _success(rows, descriptor, attempts, cache_hit=False)
+
+    def official_source_registry(
+        self,
+        *,
+        source_kind: str = "",
+        include_disabled: bool = True,
+    ) -> SourceEventResult:
+        rows = [
+            row
+            for row in official_source_seed_rows()
+            if (not source_kind or row["source_kind"] == source_kind) and (include_disabled or row["enabled"])
+        ]
+        self._write_official_source_registry(rows)
+        descriptor = _source_descriptor(
+            source="official_source_registry",
+            source_id="official_source_registry",
+            trust_tier="registry",
+            license_scope="registry_metadata",
+            retention_policy="metadata_only",
+            raw_storage_policy="metadata_only",
+            quality_label="registry_seed",
+            metadata_only=True,
+        )
+        return SourceEventResult(
+            rows=rows,
+            cache_hit=False,
+            cache_mode="registry",
+            metadata=_metadata(descriptor, [{"provider": "local_registry", "status": "ok"}], rows),
+        )
+
+    def official_source_events(
+        self,
+        *,
+        source_id: str = "",
+        source_kind: str = "",
+        limit: int,
+        force_refresh: bool = False,
+        request_timeout_seconds: float = 12.0,
+        upstream_timeout_seconds: float = 5.0,
+    ) -> SourceEventResult:
+        route = "official_sources"
+        descriptor = _source_descriptor(
+            source=route,
+            source_id="official_sources",
+            trust_tier="trusted_fact",
+            license_scope="public_official_metadata",
+            retention_policy="metadata_only",
+            raw_storage_policy="metadata_only",
+            quality_label="official_metadata",
+            metadata_only=True,
+        )
+        self._write_official_source_registry(official_source_seed_rows())
+        effective_source_kind = source_kind or "official_sources"
+        request_key = _request_key(
+            route,
+            {"source_id": source_id, "source_kind": effective_source_kind, "limit": limit},
+        )
+        cached = self._read_cached_events(route, request_key, limit=limit)
+        if cached and not force_refresh:
+            return _success(cached, descriptor, [{"provider": "cache", "status": "hit"}], cache_hit=True)
+
+        selected_sources = [
+            source
+            for source in OFFICIAL_SOURCE_SEEDS
+            if source.enabled
+            and (not source_id or source.source_id == source_id)
+            and source.source_kind == effective_source_kind
+        ]
+        if not selected_sources:
+            return _degraded(
+                [],
+                descriptor,
+                [{"provider": "official_feed", "status": "skipped"}],
+                {
+                    "code": "NO_ENABLED_OFFICIAL_SOURCES",
+                    "message": "No enabled official source registry entries matched the request.",
+                },
+            )
+
+        attempts = [{"provider": "cache", "status": "miss" if not cached else "bypass"}]
+        degradation_events = []
+        rows: list[dict[str, Any]] = []
+        deadline_at = time.monotonic() + request_timeout_seconds
+        started_at = _utc_now()
+        for source in selected_sources:
+            if len(rows) >= limit:
+                break
+            source_row = official_source_row(source)
+            try:
+                provider = _provider(self._providers, "official_feed")
+                response = _run_with_timeout(
+                    lambda source_row=source_row, provider=provider: provider.fetch(
+                        "feed_events",
+                        {"source": source_row, "limit": max(limit - len(rows), 1)},
+                        fields=None,
+                    ),
+                    timeout_seconds=min(
+                        float(source.timeout_seconds),
+                        upstream_timeout_seconds,
+                        _remaining_seconds(deadline_at),
+                    ),
+                    timeout_message=f"Official source feed request timed out for {source.source_id}.",
+                )
+                source_rows = [_official_source_event(row, source=source) for row in response.rows()]
+                source_rows = [row for row in source_rows if row.get("source_event_id")]
+                if not source_rows:
+                    raise GatewayError(GatewayErrorCode.EMPTY_DATA, "Official source feed returned no rows.")
+            except GatewayError as error:
+                attempts.append(_failed_attempt("official_feed", error, source_id=source.source_id))
+                degradation_events.append(_warning(error, f"Unable to fetch official source {source.source_id}."))
+                continue
+            attempts.append({"provider": "official_feed", "source_id": source.source_id, "status": "ok"})
+            rows.extend(source_rows[: max(limit - len(rows), 0)])
+
+        if not rows:
+            warning = {
+                "code": "OFFICIAL_SOURCE_EVENTS_UNAVAILABLE",
+                "message": "No enabled official source feed returned rows.",
+            }
+            if degradation_events:
+                warning["causes"] = degradation_events
+            self._write_fetch_run(route, request_key, "official_feed", "degraded", started_at, 0, None)
+            return _degraded([], descriptor, attempts, warning)
+
+        rows = self._write_source_events(route, request_key, rows[:limit], descriptor)
+        self._write_fetch_run(route, request_key, "official_feed", "ok", started_at, len(rows), None)
+        metadata = _metadata(descriptor, attempts, rows, degradation_events=degradation_events)
+        return SourceEventResult(
+            rows=rows,
+            cache_hit=False,
+            cache_mode="upstream",
+            metadata=metadata,
+            status="degraded" if degradation_events else "ok",
+            warning=degradation_events[0] if degradation_events else None,
+        )
+
+    def industry_media_events(
+        self,
+        *,
+        source_id: str = "",
+        limit: int,
+        force_refresh: bool = False,
+        request_timeout_seconds: float = 12.0,
+        upstream_timeout_seconds: float = 5.0,
+    ) -> SourceEventResult:
+        route = "industry_media"
+        descriptor = _source_descriptor(
+            source=route,
+            source_id="industry_media",
+            trust_tier="research_context",
+            license_scope="public_context_metadata",
+            retention_policy="metadata_only",
+            raw_storage_policy="metadata_only",
+            quality_label="public_industry_media",
+            metadata_only=True,
+        )
+        self._write_official_source_registry(official_source_seed_rows())
+        request_key = _request_key(route, {"source_id": source_id, "limit": limit})
+        cached = self._read_cached_events(route, request_key, limit=limit)
+        if cached and not force_refresh:
+            return _success(cached, descriptor, [{"provider": "cache", "status": "hit"}], cache_hit=True)
+
+        selected_sources = [
+            source
+            for source in OFFICIAL_SOURCE_SEEDS
+            if source.enabled
+            and source.source_kind == "industry_media"
+            and (not source_id or source.source_id == source_id)
+        ]
+        if not selected_sources:
+            return _degraded(
+                [],
+                descriptor,
+                [{"provider": "official_feed", "status": "skipped"}],
+                {
+                    "code": "NO_ENABLED_INDUSTRY_MEDIA_SOURCES",
+                    "message": "No enabled industry media registry entries matched the request.",
+                },
+            )
+
+        attempts = [{"provider": "cache", "status": "miss" if not cached else "bypass"}]
+        degradation_events = []
+        rows: list[dict[str, Any]] = []
+        deadline_at = time.monotonic() + request_timeout_seconds
+        started_at = _utc_now()
+        for source in selected_sources:
+            if len(rows) >= limit:
+                break
+            source_row = official_source_row(source)
+            try:
+                provider = _provider(self._providers, "official_feed")
+                response = _run_with_timeout(
+                    lambda source_row=source_row, provider=provider: provider.fetch(
+                        "feed_events",
+                        {"source": source_row, "limit": max(limit - len(rows), 1)},
+                        fields=None,
+                    ),
+                    timeout_seconds=min(
+                        float(source.timeout_seconds),
+                        upstream_timeout_seconds,
+                        _remaining_seconds(deadline_at),
+                    ),
+                    timeout_message=f"Industry media feed request timed out for {source.source_id}.",
+                )
+                source_rows = [
+                    _official_source_event(
+                        row,
+                        source=source,
+                        source_type="public_industry_media",
+                        event_id_prefix="industry_media",
+                        confidence=0.45,
+                    )
+                    for row in response.rows()
+                ]
+                source_rows = [row for row in source_rows if row.get("source_event_id")]
+                if not source_rows:
+                    raise GatewayError(GatewayErrorCode.EMPTY_DATA, "Industry media feed returned no rows.")
+            except GatewayError as error:
+                attempts.append(_failed_attempt("official_feed", error, source_id=source.source_id))
+                degradation_events.append(_warning(error, f"Unable to fetch industry media source {source.source_id}."))
+                continue
+            attempts.append({"provider": "official_feed", "source_id": source.source_id, "status": "ok"})
+            rows.extend(source_rows[: max(limit - len(rows), 0)])
+
+        if not rows:
+            warning = {
+                "code": "INDUSTRY_MEDIA_EVENTS_UNAVAILABLE",
+                "message": "No enabled industry media feed returned rows.",
+            }
+            if degradation_events:
+                warning["causes"] = degradation_events
+            self._write_fetch_run(route, request_key, "official_feed", "degraded", started_at, 0, None)
+            return _degraded([], descriptor, attempts, warning)
+
+        rows = self._write_source_events(route, request_key, rows[:limit], descriptor)
+        self._write_fetch_run(route, request_key, "official_feed", "ok", started_at, len(rows), None)
+        metadata = _metadata(descriptor, attempts, rows, degradation_events=degradation_events)
+        return SourceEventResult(
+            rows=rows,
+            cache_hit=False,
+            cache_mode="upstream",
+            metadata=metadata,
+            status="degraded" if degradation_events else "ok",
+            warning=degradation_events[0] if degradation_events else None,
+        )
 
     def news_permission_smoke(
         self,
@@ -338,6 +693,7 @@ class SourceEventService:
             raw_storage_policy="disabled",
             quality_label="permission_probe",
             metadata_only=True,
+            permission_status="credential_required",
         )
         status = "ok" if any(row["status"] == "ok" for row in rows) else "degraded"
         warning = (
@@ -456,12 +812,97 @@ class SourceEventService:
                 );
                 """
             )
+            _ensure_columns(self._connection, "source_registry", _SOURCE_REGISTRY_COLUMNS)
+            _ensure_columns(self._connection, "source_events", _SOURCE_EVENT_LEDGER_COLUMNS)
+
+    def _write_official_source_registry(self, rows: list[dict[str, Any]]) -> None:
+        now = _utc_now()
+        with self._lock, self._connection:
+            for row in rows:
+                request_policy_json = json.dumps(
+                    {
+                        "max_concurrency": 1,
+                        "timeout_seconds": row.get("timeout_seconds"),
+                        "max_retries": 1,
+                        "backoff_seconds": 0.25,
+                        "per_domain_pacing_seconds": row.get("pacing_seconds"),
+                        "cache_ttl_seconds": _STALE_AFTER_SECONDS,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO source_registry (
+                      source_id, source_type, provider, trust_tier, license_scope,
+                      retention_policy, raw_storage_policy, updated_at, permission_status,
+                      robots_tos_status, redistribution_policy, anti_bot_risk, owner_service,
+                      parser_version, request_policy_json, source_kind, country, market,
+                      domain, base_url, feed_url, parser_strategy, enabled, pacing_seconds,
+                      allowed_fields_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                      source_type = excluded.source_type,
+                      provider = excluded.provider,
+                      trust_tier = excluded.trust_tier,
+                      license_scope = excluded.license_scope,
+                      retention_policy = excluded.retention_policy,
+                      raw_storage_policy = excluded.raw_storage_policy,
+                      permission_status = excluded.permission_status,
+                      robots_tos_status = excluded.robots_tos_status,
+                      redistribution_policy = excluded.redistribution_policy,
+                      anti_bot_risk = excluded.anti_bot_risk,
+                      owner_service = excluded.owner_service,
+                      parser_version = excluded.parser_version,
+                      request_policy_json = excluded.request_policy_json,
+                      source_kind = excluded.source_kind,
+                      country = excluded.country,
+                      market = excluded.market,
+                      domain = excluded.domain,
+                      base_url = excluded.base_url,
+                      feed_url = excluded.feed_url,
+                      parser_strategy = excluded.parser_strategy,
+                      enabled = excluded.enabled,
+                      pacing_seconds = excluded.pacing_seconds,
+                      allowed_fields_json = excluded.allowed_fields_json,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        row["source_id"],
+                        row["source_kind"],
+                        row["provider"],
+                        row["trust_tier"],
+                        row["license_scope"],
+                        row["retention_policy"],
+                        "metadata_only",
+                        now,
+                        row["permission_status"],
+                        row["robots_tos_status"],
+                        row.get("redistribution_policy", "metadata_only"),
+                        "low" if row["enabled"] else "unknown",
+                        row["owner_service"],
+                        row["parser_version"],
+                        request_policy_json,
+                        row["source_kind"],
+                        row["country"],
+                        row["market"],
+                        row["domain"],
+                        row["base_url"],
+                        row["feed_url"],
+                        row["parser_strategy"],
+                        1 if row["enabled"] else 0,
+                        row["pacing_seconds"],
+                        json.dumps(row.get("allowed_fields", []), ensure_ascii=False, sort_keys=True),
+                    ),
+                )
 
     def _read_cached_events(self, route: str, request_key: str, *, limit: int) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT payload_json
+                SELECT
+                  payload_json, dedupe_key, first_seen_at, last_seen_at, freshness_state,
+                  content_hash, metadata_hash, duplicate_of, parser_version
                 FROM source_events
                 WHERE route = ?
                   AND request_key = ?
@@ -470,7 +911,7 @@ class SourceEventService:
                 """,
                 (route, request_key, limit),
             ).fetchall()
-        return [json.loads(row["payload_json"]) for row in rows]
+        return [_row_with_cached_freshness(row) for row in rows]
 
     def _write_source_events(
         self,
@@ -478,15 +919,20 @@ class SourceEventService:
         request_key: str,
         rows: list[dict[str, Any]],
         descriptor: dict[str, Any],
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         now = _utc_now()
+        governance = descriptor["governance"]
+        request_policy_json = json.dumps(governance["request_policy"], ensure_ascii=False, sort_keys=True)
+        written_rows = []
         with self._lock, self._connection:
             self._connection.execute(
                 """
                 INSERT INTO source_registry (
                   source_id, source_type, provider, trust_tier, license_scope,
-                  retention_policy, raw_storage_policy, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  retention_policy, raw_storage_policy, updated_at, permission_status,
+                  robots_tos_status, redistribution_policy, anti_bot_risk, owner_service,
+                  parser_version, request_policy_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                   source_type = excluded.source_type,
                   provider = excluded.provider,
@@ -494,6 +940,13 @@ class SourceEventService:
                   license_scope = excluded.license_scope,
                   retention_policy = excluded.retention_policy,
                   raw_storage_policy = excluded.raw_storage_policy,
+                  permission_status = excluded.permission_status,
+                  robots_tos_status = excluded.robots_tos_status,
+                  redistribution_policy = excluded.redistribution_policy,
+                  anti_bot_risk = excluded.anti_bot_risk,
+                  owner_service = excluded.owner_service,
+                  parser_version = excluded.parser_version,
+                  request_policy_json = excluded.request_policy_json,
                   updated_at = excluded.updated_at
                 """,
                 (
@@ -505,11 +958,18 @@ class SourceEventService:
                     descriptor["retention_policy"],
                     descriptor["raw_storage_policy"],
                     now,
+                    governance["permission_status"],
+                    governance["robots_tos_status"],
+                    governance["redistribution_policy"],
+                    governance["anti_bot_risk"],
+                    governance["owner_service"],
+                    governance["parser_version"],
+                    request_policy_json,
                 ),
             )
             self._connection.execute(
                 """
-                INSERT INTO source_quality_snapshots (
+                INSERT OR REPLACE INTO source_quality_snapshots (
                   snapshot_id, source_id, snapshot_at, label, trust_tier, parser_health, metadata_only
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -524,7 +984,8 @@ class SourceEventService:
                 ),
             )
             for row in rows:
-                self._write_source_event_row(route, request_key, row, descriptor)
+                written_rows.append(self._write_source_event_row(route, request_key, row, descriptor))
+        return written_rows
 
     def _write_source_event_row(
         self,
@@ -532,16 +993,30 @@ class SourceEventService:
         request_key: str,
         row: dict[str, Any],
         descriptor: dict[str, Any],
-    ) -> None:
+    ) -> dict[str, Any]:
         fetched_at = row.get("fetched_at") or _utc_now()
+        parser_version = str(row.get("parser_version") or descriptor["parser_version"])
+        row = {
+            **row,
+            "fetched_at": fetched_at,
+            "governance": row.get("governance") or descriptor["governance"],
+            "extraction": row.get("extraction")
+            or metadata_only_extraction_status(
+                parser_version=parser_version,
+                summary=str(row.get("summary") or ""),
+            ),
+        }
+        row, ledger = self._ledger_row(row, descriptor)
+        row = {**row, "freshness": _freshness_payload(ledger)}
         payload_json = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
         self._connection.execute(
             """
             INSERT INTO source_events (
               source_event_id, route, request_key, payload_json, source_id, source_type,
               provider, trust_tier, entity_type, entity_id, event_type, event_time,
-              published_at, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              published_at, fetched_at, dedupe_key, first_seen_at, last_seen_at,
+              freshness_state, content_hash, metadata_hash, duplicate_of, parser_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_event_id) DO UPDATE SET
               route = excluded.route,
               request_key = excluded.request_key,
@@ -555,7 +1030,15 @@ class SourceEventService:
               event_type = excluded.event_type,
               event_time = excluded.event_time,
               published_at = excluded.published_at,
-              fetched_at = excluded.fetched_at
+              fetched_at = excluded.fetched_at,
+              dedupe_key = excluded.dedupe_key,
+              first_seen_at = excluded.first_seen_at,
+              last_seen_at = excluded.last_seen_at,
+              freshness_state = excluded.freshness_state,
+              content_hash = excluded.content_hash,
+              metadata_hash = excluded.metadata_hash,
+              duplicate_of = excluded.duplicate_of,
+              parser_version = excluded.parser_version
             """,
             (
                 row["source_event_id"],
@@ -572,6 +1055,14 @@ class SourceEventService:
                 row.get("event_time"),
                 row.get("published_at"),
                 fetched_at,
+                ledger["dedupe_key"],
+                ledger["first_seen_at"],
+                ledger["last_seen_at"],
+                ledger["state"],
+                ledger["content_hash"],
+                ledger["metadata_hash"],
+                ledger["duplicate_of"],
+                ledger["parser_version"],
             ),
         )
         document_id = _stable_id("document", row["source_event_id"])
@@ -673,6 +1164,61 @@ class SourceEventService:
                     fetched_at,
                 ),
             )
+        return row
+
+    def _ledger_row(self, row: dict[str, Any], descriptor: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        now = row["fetched_at"]
+        parser_version = str(row.get("parser_version") or descriptor["parser_version"])
+        dedupe_key = _dedupe_key(row)
+        content_hash = str(row.get("raw_hash") or _hash_payload(row))
+        metadata_hash = _metadata_hash(row)
+        existing = self._find_existing_event(row["source_event_id"], dedupe_key)
+        duplicate_of = None
+        canonical_event_id = row["source_event_id"]
+        if existing is None:
+            state = "new"
+            first_seen_at = now
+            previous_parser_version = None
+        else:
+            canonical_event_id = existing["source_event_id"]
+            first_seen_at = existing["first_seen_at"] or existing["fetched_at"] or now
+            previous_parser_version = existing["parser_version"]
+            duplicate_of = canonical_event_id if canonical_event_id != row["source_event_id"] else None
+            parser_changed = bool(previous_parser_version and previous_parser_version != parser_version)
+            hash_changed = existing["metadata_hash"] not in (None, metadata_hash) or existing["content_hash"] not in (
+                None,
+                content_hash,
+            )
+            state = "updated" if parser_changed or hash_changed else "unchanged"
+            row = {**row, "source_event_id": canonical_event_id}
+        ledger = {
+            "state": state,
+            "dedupe_key": dedupe_key,
+            "first_seen_at": first_seen_at,
+            "last_seen_at": now,
+            "fetched_at": now,
+            "content_hash": content_hash,
+            "metadata_hash": metadata_hash,
+            "duplicate_of": duplicate_of,
+            "parser_version": parser_version,
+            "previous_parser_version": previous_parser_version,
+            "parser_version_changed": bool(previous_parser_version and previous_parser_version != parser_version),
+        }
+        return row, ledger
+
+    def _find_existing_event(self, source_event_id: str, dedupe_key: str) -> sqlite3.Row | None:
+        return self._connection.execute(
+            """
+            SELECT
+              source_event_id, fetched_at, first_seen_at, last_seen_at,
+              metadata_hash, content_hash, parser_version
+            FROM source_events
+            WHERE source_event_id = ? OR dedupe_key = ?
+            ORDER BY CASE WHEN source_event_id = ? THEN 0 ELSE 1 END, first_seen_at, fetched_at
+            LIMIT 1
+            """,
+            (source_event_id, dedupe_key, source_event_id),
+        ).fetchone()
 
     def _write_fetch_run(
         self,
@@ -694,7 +1240,7 @@ class SourceEventService:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    _stable_id("run", route, request_key, provider, started_at, completed_at),
+                    _stable_id("run", route, request_key, provider, started_at, completed_at, time.time_ns()),
                     route,
                     request_key,
                     provider,
@@ -703,9 +1249,95 @@ class SourceEventService:
                     completed_at,
                     row_count,
                     error.code.value if error else None,
-                    error.message if error else None,
+                    sanitize_error_message(error.message) if error else None,
                 ),
             )
+
+
+def _ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, definition in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def _row_with_cached_freshness(row: sqlite3.Row) -> dict[str, Any]:
+    payload = json.loads(row["payload_json"])
+    freshness = {
+        "state": "stale" if _is_stale(row["last_seen_at"]) else row["freshness_state"],
+        "dedupe_key": row["dedupe_key"],
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_at": row["last_seen_at"],
+        "fetched_at": payload.get("fetched_at"),
+        "content_hash": row["content_hash"],
+        "metadata_hash": row["metadata_hash"],
+        "duplicate_of": row["duplicate_of"],
+        "parser_version": row["parser_version"],
+        "previous_parser_version": None,
+        "parser_version_changed": False,
+    }
+    return {**payload, "freshness": freshness}
+
+
+def _freshness_payload(ledger: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "state": ledger["state"],
+        "dedupe_key": ledger["dedupe_key"],
+        "first_seen_at": ledger["first_seen_at"],
+        "last_seen_at": ledger["last_seen_at"],
+        "fetched_at": ledger["fetched_at"],
+        "content_hash": ledger["content_hash"],
+        "metadata_hash": ledger["metadata_hash"],
+        "duplicate_of": ledger["duplicate_of"],
+        "parser_version": ledger["parser_version"],
+        "previous_parser_version": ledger["previous_parser_version"],
+        "parser_version_changed": ledger["parser_version_changed"],
+    }
+
+
+def _dedupe_key(row: dict[str, Any]) -> str:
+    source_url = str(row.get("source_url") or "").strip().lower()
+    provider_item_id = str(row.get("provider_item_id") or "").strip().lower()
+    published_at = str(row.get("published_at") or row.get("event_time") or "").strip()
+    title_hash = _stable_id(str(row.get("title") or "").strip().lower())
+    entity_id = str(row.get("entity_id") or "").strip().upper()
+    identity = source_url or provider_item_id or row.get("source_event_id")
+    return _stable_id(row.get("source_type"), row.get("source_id"), identity, published_at, title_hash, entity_id)
+
+
+def _metadata_hash(row: dict[str, Any]) -> str:
+    metadata = {
+        key: value
+        for key, value in row.items()
+        if key
+        not in {
+            "source_event_id",
+            "provider_item_id",
+            "raw_hash",
+            "freshness",
+            "fetched_at",
+            "governance",
+            "degradation_warnings",
+        }
+    }
+    return _hash_payload(metadata)
+
+
+def _is_stale(last_seen_at: Any) -> bool:
+    parsed = _parse_utc(last_seen_at)
+    if parsed is None:
+        return False
+    return (datetime.now(timezone.utc) - parsed).total_seconds() > _STALE_AFTER_SECONDS
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _official_filing_event(row: dict[str, Any]) -> dict[str, Any]:
@@ -714,6 +1346,7 @@ def _official_filing_event(row: dict[str, Any]) -> dict[str, Any]:
     form = str(row.get("form") or row.get("event_type") or "filing").strip()
     filing_date = _iso_date(row.get("filing_date") or row.get("published_at"))
     entity_name = row.get("entity_name") or row.get("company_name")
+    ticker = str(row.get("ticker") or row.get("symbol") or "").strip().upper()
     return _drop_empty(
         {
             "source_event_id": row.get("source_event_id") or f"sec_edgar:{cik}:{accession}",
@@ -724,6 +1357,8 @@ def _official_filing_event(row: dict[str, Any]) -> dict[str, Any]:
             "entity_type": "company",
             "entity_id": cik,
             "entity_name": entity_name,
+            "company_name": entity_name,
+            "ticker": ticker,
             "market": row.get("market") or "US",
             "event_type": form,
             "event_time": filing_date,
@@ -813,6 +1448,42 @@ def _news_context_event(row: dict[str, Any], *, src: str, query: str) -> dict[st
     )
 
 
+def _open_news_index_event(row: dict[str, Any], *, query: str) -> dict[str, Any]:
+    provider_item_id = str(row.get("provider_item_id") or _stable_id(row.get("source_url"), row.get("title")))
+    published_at = row.get("published_at")
+    domain = str(row.get("source_domain") or "").strip()
+    return _drop_empty(
+        {
+            "source_event_id": f"gdelt:{provider_item_id}",
+            "source_id": "gdelt_doc",
+            "source_type": "open_news_index",
+            "provider": "gdelt",
+            "trust_tier": "context_only",
+            "entity_type": "topic",
+            "entity_id": query,
+            "entity_name": query,
+            "market": row.get("source_country") or "GLOBAL",
+            "event_type": "news_index",
+            "event_time": published_at,
+            "published_at": published_at,
+            "fetched_at": row.get("fetched_at") or _utc_now(),
+            "title": row.get("title"),
+            "summary": f"Open news index metadata for {query}.",
+            "source_url": row.get("source_url"),
+            "source_domain": domain,
+            "language": row.get("language"),
+            "topic_hints": row.get("topic_hints") or [query],
+            "provider_item_id": provider_item_id,
+            "raw_hash": row.get("raw_hash") or _hash_payload(row),
+            "license_scope": "public_news_index_metadata",
+            "retention_policy": "metadata_only",
+            "confidence": 0.55,
+            "degradation_warnings": [],
+            "metadata_only": True,
+        }
+    )
+
+
 def _social_heat_event(row: dict[str, Any]) -> dict[str, Any]:
     symbol = str(row.get("symbol") or "").upper()
     message_id = str(row.get("message_id") or row.get("provider_item_id") or "")
@@ -846,6 +1517,68 @@ def _social_heat_event(row: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _official_source_event(
+    row: dict[str, Any],
+    *,
+    source: OfficialSourceDefinition,
+    source_type: str = "official_source",
+    event_id_prefix: str = "official_source",
+    confidence: float = 1.0,
+) -> dict[str, Any]:
+    provider_item_id = str(row.get("provider_item_id") or _stable_id(source.source_id, row.get("source_url")))
+    published_at = row.get("published_at") or row.get("event_time")
+    governance = {
+        "source_id": source.source_id,
+        "permission_status": source.permission_status,
+        "robots_tos_status": source.robots_tos_status,
+        "license_scope": source.license_scope,
+        "retention_policy": source.retention_policy,
+        "redistribution_policy": source.redistribution_policy,
+        "anti_bot_risk": "low",
+        "owner_service": source.owner_service,
+        "parser_version": source.parser_version,
+        "request_policy": {
+            "max_concurrency": 1,
+            "timeout_seconds": source.timeout_seconds,
+            "max_retries": 1,
+            "backoff_seconds": 0.25,
+            "per_domain_pacing_seconds": source.pacing_seconds,
+            "cache_ttl_seconds": _STALE_AFTER_SECONDS,
+        },
+    }
+    return _drop_empty(
+        {
+            "source_event_id": f"{event_id_prefix}:{source.source_id}:{provider_item_id}",
+            "source_id": source.source_id,
+            "source_type": source_type,
+            "provider": row.get("provider") or source.provider,
+            "trust_tier": row.get("trust_tier") or source.trust_tier,
+            "entity_type": "source",
+            "entity_id": source.source_id,
+            "entity_name": source.provider,
+            "market": row.get("market") or source.market,
+            "event_type": row.get("event_type") or source.event_type,
+            "event_time": published_at,
+            "published_at": published_at,
+            "fetched_at": row.get("fetched_at") or _utc_now(),
+            "title": row.get("title"),
+            "summary": row.get("summary") or f"Official source metadata from {source.domain}.",
+            "source_url": row.get("source_url") or source.base_url,
+            "source_domain": row.get("source_domain") or source.domain,
+            "language": row.get("language") or source.language,
+            "provider_item_id": provider_item_id,
+            "raw_hash": row.get("raw_hash") or _hash_payload(row),
+            "license_scope": row.get("license_scope") or source.license_scope,
+            "retention_policy": row.get("retention_policy") or source.retention_policy,
+            "confidence": confidence,
+            "degradation_warnings": [],
+            "metadata_only": True,
+            "parser_version": source.parser_version,
+            "governance": governance,
+        }
+    )
+
+
 def _source_descriptor(
     *,
     source: str,
@@ -857,7 +1590,23 @@ def _source_descriptor(
     quality_label: str,
     metadata_only: bool,
     skipped_noise_count: int = 0,
+    permission_status: str = "public_allowed",
+    robots_tos_status: str = "allowed",
+    redistribution_policy: str = "metadata_only",
+    anti_bot_risk: str = "low",
+    request_policy: SourceRequestPolicy | None = None,
 ) -> dict[str, Any]:
+    governance = default_source_governance(
+        source_id=source_id,
+        license_scope=license_scope,
+        retention_policy=retention_policy,
+        parser_version=_PARSER_VERSION,
+        permission_status=permission_status,
+        robots_tos_status=robots_tos_status,
+        redistribution_policy=redistribution_policy,
+        anti_bot_risk=anti_bot_risk,
+        request_policy=request_policy,
+    )
     return {
         "source": source,
         "source_id": source_id,
@@ -866,6 +1615,7 @@ def _source_descriptor(
         "retention_policy": retention_policy,
         "raw_storage_policy": raw_storage_policy,
         "parser_version": _PARSER_VERSION,
+        "governance": governance_metadata(governance),
         "source_quality": {
             "label": quality_label,
             "parser_health": "ok",
@@ -927,6 +1677,7 @@ def _metadata(
         "retention_policy": descriptor["retention_policy"],
         "raw_storage_policy": descriptor["raw_storage_policy"],
         "parser_version": descriptor["parser_version"],
+        "governance": descriptor["governance"],
     }
 
 
@@ -956,8 +1707,8 @@ def _provider(providers: dict[str, ExternalDataProvider], name: str) -> External
     return provider
 
 
-def _failed_attempt(provider: str, error: GatewayError) -> dict[str, Any]:
-    return {"provider": provider, "status": "failed", "reason": error.code.value}
+def _failed_attempt(provider: str, error: GatewayError, **metadata: Any) -> dict[str, Any]:
+    return {"provider": provider, "status": "failed", "reason": error.code.value, **metadata}
 
 
 def _warning(error: GatewayError, message: str) -> dict[str, Any]:
@@ -1056,7 +1807,7 @@ def _run_with_timeout(
     if status == "error":
         if isinstance(result, GatewayError):
             raise result
-        raise GatewayError(GatewayErrorCode.PROVIDER_UNAVAILABLE, str(result)) from result
+        raise GatewayError(GatewayErrorCode.PROVIDER_UNAVAILABLE, sanitize_error_message(str(result))) from result
     return result
 
 

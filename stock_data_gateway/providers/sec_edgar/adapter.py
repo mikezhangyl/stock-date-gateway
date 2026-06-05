@@ -11,6 +11,7 @@ from stock_data_gateway.core.errors import GatewayError, GatewayErrorCode
 from stock_data_gateway.domain.provider import ProviderHealth, ProviderResponse
 
 _SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions"
+_SUPPORTED_FORM_TYPES = {"8-K", "10-K", "10-Q", "6-K", "SC 13D", "SC 13G", "144", "4"}
 
 
 class SecEdgarProvider:
@@ -60,22 +61,28 @@ def _filing_rows(payload: dict[str, Any], *, cik: str, limit: int) -> list[dict[
         return []
     accession_numbers = _list_values(recent.get("accessionNumber"))
     entity_name = str(payload.get("name") or "").strip()
+    ticker = _first_ticker(payload.get("tickers"))
     fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     rows = []
-    for index, accession_number in enumerate(accession_numbers[:limit]):
+    for index, accession_number in enumerate(accession_numbers):
         accession = str(accession_number or "").strip()
+        form = str(_list_item(recent.get("form"), index) or "").strip().upper()
+        if form not in _SUPPORTED_FORM_TYPES:
+            continue
         primary_document = _list_item(recent.get("primaryDocument"), index)
         row = {
             "cik": cik,
             "entity_name": entity_name,
+            "company_name": entity_name,
+            "ticker": ticker,
             "market": "US",
-            "form": _list_item(recent.get("form"), index),
+            "form": form,
             "filing_date": _list_item(recent.get("filingDate"), index),
             "report_date": _list_item(recent.get("reportDate"), index),
             "accession_number": accession,
             "primary_document": primary_document,
             "title": _list_item(recent.get("primaryDocDescription"), index)
-            or f"{_list_item(recent.get('form'), index)} filing",
+            or f"{form} filing",
             "source_url": _filing_url(cik, accession, primary_document),
             "raw_hash": _hash_payload({"cik": cik, "accession_number": accession, "payload": payload}),
             "blob_uri": f"bronze/sec_edgar/submissions/CIK{cik}.json",
@@ -84,6 +91,8 @@ def _filing_rows(payload: dict[str, Any], *, cik: str, limit: int) -> list[dict[
         }
         if accession:
             rows.append(_drop_empty(row))
+        if len(rows) >= limit:
+            break
     return rows
 
 
@@ -113,6 +122,11 @@ def _list_item(value: Any, index: int) -> Any:
     if index >= len(values):
         return None
     return values[index]
+
+
+def _first_ticker(value: Any) -> str:
+    values = _list_values(value)
+    return str(values[0]).strip().upper() if values else ""
 
 
 def _optional_int(value: Any, *, default: int, maximum: int) -> int:

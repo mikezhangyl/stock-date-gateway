@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>叙事源验收报告</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px; color: #172026; }
+    h1 { font-size: 26px; margin-bottom: 8px; }
+    .summary { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 12px; margin: 20px 0; }
+    .item { border: 1px solid #d7dee5; border-radius: 6px; padding: 12px; }
+    .label { color: #52606d; font-size: 13px; margin-bottom: 4px; }
+    .value { font-size: 18px; font-weight: 650; }
+    table { width: 100%; border-collapse: collapse; margin-top: 18px; font-size: 13px; }
+    th, td { border: 1px solid #d7dee5; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f5f7f9; }
+    .passed { color: #087f5b; font-weight: 650; }
+    .degraded { color: #9a6700; font-weight: 650; }
+    .failed { color: #c92a2a; font-weight: 650; }
+  </style>
+</head>
+<body>
+  <h1>叙事源验收报告</h1>
+  <div>生成时间：2026-06-05T05:43:14+00:00</div>
+  <div class="summary">
+    <div class="item">
+      <div class="label">总体状态</div><div class="value degraded">degraded</div>
+    </div>
+    <div class="item">
+      <div class="label">Gateway Base URL</div><div class="value">http://127.0.0.1:8700</div>
+    </div>
+    <div class="item">
+      <div class="label">是否启用 Stocktwits live upstream</div><div class="value">否</div>
+    </div>
+    <div class="item">
+      <div class="label">是否可供 FNI 清理 direct adapters</div><div class="value">是</div>
+    </div>
+  </div>
+  <p>Gateway narrative source acceptance is passed or explicitly degraded.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>source kind</th><th>状态</th><th>route</th><th>provider</th><th>row_count</th>
+        <th>cache_hit</th><th>trust_tier</th><th>source_quality</th><th>license_scope</th>
+        <th>retention_policy</th><th>warning / degradation reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+  <td>official_filings</td>
+  <td class="passed">passed</td>
+  <td>/api/v1/market-data/narrative/source-events/official-filings</td>
+  <td>sec_edgar</td>
+  <td>1</td>
+  <td>是</td>
+  <td>trusted_fact</td>
+  <td>official_metadata</td>
+  <td>public_filing</td>
+  <td>metadata_and_raw_payload</td>
+  <td></td>
+</tr>
+<tr>
+  <td>official_disclosures</td>
+  <td class="passed">passed</td>
+  <td>/api/v1/market-data/narrative/source-events/official-disclosures</td>
+  <td>cninfo</td>
+  <td>1</td>
+  <td>否</td>
+  <td>trusted_fact</td>
+  <td>official_metadata</td>
+  <td>public_disclosure_metadata</td>
+  <td>metadata_only</td>
+  <td></td>
+</tr>
+<tr>
+  <td>news_context</td>
+  <td class="passed">passed</td>
+  <td>/api/v1/market-data/narrative/source-events/news-context</td>
+  <td>tushare</td>
+  <td>1</td>
+  <td>否</td>
+  <td>context_only</td>
+  <td>public_context</td>
+  <td>context_only</td>
+  <td>metadata_only</td>
+  <td></td>
+</tr>
+<tr>
+  <td>social_heat_disabled</td>
+  <td class="degraded">degraded</td>
+  <td>/api/v1/market-data/narrative/source-events/social-heat</td>
+  <td>stocktwits</td>
+  <td>0</td>
+  <td>否</td>
+  <td>heat_signal_only</td>
+  <td>community_heat</td>
+  <td>public_context</td>
+  <td>metadata_only</td>
+  <td>SOCIAL_SOURCE_DISABLED: Social heat sources are disabled by default.</td>
+</tr>
+<tr>
+  <td>news_permission_smoke</td>
+  <td class="passed">passed</td>
+  <td>/api/v1/market-data/source-events/news-permission-smoke</td>
+  <td>tushare</td>
+  <td>6</td>
+  <td>否</td>
+  <td>diagnostic</td>
+  <td>permission_probe</td>
+  <td>diagnostic_only</td>
+  <td>no_payload_retention</td>
+  <td></td>
+</tr>
+    </tbody>
+  </table>
+</body>
+</html>
