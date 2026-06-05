@@ -22,14 +22,14 @@ _CLASSIFICATION_RULES = (
         ("重大合同", "合同", "订单", "中标", "项目中选", "采购协议"),
     ),
     (
-        "investment_project",
-        "投资项目",
+        "capacity_project_investment",
+        "产能/项目投资",
         "positive",
         ("对外投资", "投资项目", "项目投资", "设立子公司", "合资公司"),
     ),
     (
-        "capacity_expansion",
-        "产能扩张",
+        "capacity_project_investment",
+        "产能/项目投资",
         "positive",
         ("扩产", "产能", "生产基地", "项目建设", "投产", "开工建设"),
     ),
@@ -46,13 +46,13 @@ _CLASSIFICATION_RULES = (
         ("问询函", "监管函", "处罚", "行政处罚", "立案", "调查", "纪律处分"),
     ),
     (
-        "performance_forecast_report",
+        "performance_report_forecast",
         "业绩预告/报告",
         "mixed",
         ("业绩预告", "业绩快报", "年度报告", "季度报告", "一季度报告", "半年度报告", "三季度报告"),
     ),
     (
-        "shareholder_meeting_governance",
+        "shareholder_governance",
         "股东大会/治理",
         "neutral",
         ("股东大会", "股东会", "董事会", "监事会", "法律意见书", "治理", "独立董事"),
@@ -206,7 +206,7 @@ def _classify(*, title: str, category: str) -> dict[str, str]:
                 "sentiment": sentiment,
             }
     return {
-        "event_class": "unknown_metadata",
+        "event_class": "unknown",
         "event_label_zh": "未支持分类公告",
         "sentiment": "neutral",
     }

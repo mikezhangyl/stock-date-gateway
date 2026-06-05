@@ -87,7 +87,7 @@ def test_cninfo_official_disclosures_maps_announcement_metadata() -> None:
             "name": "平安银行",
             "ann_date": "2026-03-15",
             "title": "2025年度报告",
-            "event_type": "performance_forecast_report",
+            "event_type": "performance_report_forecast",
             "event_label_zh": "业绩预告/报告",
             "sentiment": "mixed",
             "category": "年度报告",
@@ -102,6 +102,56 @@ def test_cninfo_official_disclosures_maps_announcement_metadata() -> None:
     assert "stock=000001%2Cgssz0000001" in requests[0][1]
     assert requests[0][2]["Content-type"] == "application/x-www-form-urlencoded; charset=UTF-8"
     assert requests[0][3] == 4.0
+
+
+def test_cninfo_category_mapping_covers_m20_taxonomy_and_unknown_fallback() -> None:
+    def fake_urlopen(request, timeout):
+        return FakeHttpResponse(
+            {
+                "announcements": [
+                    {
+                        "secCode": "000001",
+                        "announcementTitle": "关于重大合同中标的公告",
+                        "announcementTime": "2026-03-01",
+                    },
+                    {
+                        "secCode": "000001",
+                        "announcementTitle": "关于向特定对象发行股票的公告",
+                        "announcementTime": "2026-03-02",
+                    },
+                    {"secCode": "000001", "announcementTitle": "重大资产重组报告书", "announcementTime": "2026-03-03"},
+                    {"secCode": "000001", "announcementTitle": "监管问询函回复公告", "announcementTime": "2026-03-04"},
+                    {"secCode": "000001", "announcementTitle": "诉讼进展公告", "announcementTime": "2026-03-05"},
+                    {"secCode": "000001", "announcementTitle": "股东大会决议公告", "announcementTime": "2026-03-06"},
+                    {"secCode": "000001", "announcementTitle": "退市风险警示公告", "announcementTime": "2026-03-07"},
+                    {
+                        "secCode": "000001",
+                        "announcementTitle": "生产基地项目投资公告",
+                        "announcementTime": "2026-03-08",
+                    },
+                    {"secCode": "000001", "announcementTitle": "无法识别事项公告", "announcementTime": "2026-03-09"},
+                ]
+            }
+        )
+
+    provider = CninfoProvider(urlopen_fn=fake_urlopen)
+
+    response = provider.fetch(
+        "official_disclosures",
+        {"symbol": "000001", "start_date": "2026-03-01", "end_date": "2026-03-31", "limit": 20},
+    )
+
+    assert [row["event_type"] for row in response.rows()] == [
+        "major_contract_order",
+        "financing_refinancing",
+        "ma_restructuring",
+        "regulatory_inquiry_penalty",
+        "litigation_arbitration",
+        "shareholder_governance",
+        "risk_warning",
+        "capacity_project_investment",
+        "unknown",
+    ]
 
 
 def test_cninfo_invalid_symbol_is_gateway_error() -> None:

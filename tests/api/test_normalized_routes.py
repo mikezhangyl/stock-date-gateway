@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 
@@ -167,6 +168,44 @@ class FakeSecEdgarProvider(ExternalDataProvider):
         return ProviderHealth(provider=self.provider_name, ok=True)
 
 
+class SequencedSecEdgarProvider(ExternalDataProvider):
+    provider_name = "sec_edgar"
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.calls = 0
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        assert endpoint == "official_filings"
+        row = self.rows[min(self.calls, len(self.rows) - 1)]
+        self.calls += 1
+        return ProviderResponse.from_rows(provider=self.provider_name, endpoint=endpoint, rows=[row])
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=True)
+
+
+class FlakySecEdgarProvider(ExternalDataProvider):
+    provider_name = "sec_edgar"
+
+    def __init__(self) -> None:
+        self.fail = True
+        self.calls = 0
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        self.calls += 1
+        if self.fail:
+            raise GatewayError(GatewayErrorCode.REQUEST_TIMEOUT, "transient SEC timeout")
+        return ProviderResponse.from_rows(
+            provider=self.provider_name,
+            endpoint=endpoint,
+            rows=[_sec_row(accession_number="0000320193-26-000099")],
+        )
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=not self.fail)
+
+
 class FakeStocktwitsProvider(ExternalDataProvider):
     provider_name = "stocktwits"
 
@@ -195,6 +234,83 @@ class FakeStocktwitsProvider(ExternalDataProvider):
         return ProviderHealth(provider=self.provider_name, ok=True)
 
 
+class FakeOfficialFeedProvider(ExternalDataProvider):
+    provider_name = "official_feed"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        self.calls.append((endpoint, dict(params)))
+        assert endpoint == "feed_events"
+        source = params["source"]
+        return ProviderResponse.from_rows(
+            provider=self.provider_name,
+            endpoint=endpoint,
+            rows=[
+                {
+                    "source_id": source["source_id"],
+                    "source_kind": source["source_kind"],
+                    "provider": source["provider"],
+                    "source_domain": source["domain"],
+                    "market": source["market"],
+                    "event_type": source["event_type"],
+                    "trust_tier": source["trust_tier"],
+                    "license_scope": source["license_scope"],
+                    "retention_policy": source["retention_policy"],
+                    "quality_label": source["quality_label"],
+                    "language": source["language"],
+                    "parser_version": source["parser_version"],
+                    "metadata_only": True,
+                    "provider_item_id": f"{source['source_id']}:item-1",
+                    "title": f"{source['provider']} official update",
+                    "source_url": source["base_url"],
+                    "published_at": "2026-06-04T12:00:00Z",
+                    "summary": "Official metadata update.",
+                    "raw_hash": f"{source['source_id']}-hash",
+                    "fetched_at": "2026-06-04T12:01:00Z",
+                }
+            ],
+        )
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=True)
+
+
+class FakeGdeltProvider(ExternalDataProvider):
+    provider_name = "gdelt"
+
+    def __init__(self, *, rows: list[dict] | None = None, error: GatewayError | None = None) -> None:
+        self.rows = rows or [
+            {
+                "title": "Apple expands AI infrastructure",
+                "source_url": "https://example.com/apple-ai",
+                "source_domain": "example.com",
+                "published_at": "20260604120000",
+                "fetched_at": "2026-06-04T12:01:00Z",
+                "language": "English",
+                "source_country": "United States",
+                "query": "Apple AI",
+                "topic_hints": ["Apple AI"],
+                "provider_item_id": "gdelt-item-1",
+                "raw_hash": "gdelt-hash",
+                "metadata_only": True,
+            }
+        ]
+        self.error = error
+        self.calls: list[tuple[str, dict]] = []
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        self.calls.append((endpoint, dict(params)))
+        assert endpoint == "doc_articles"
+        if self.error is not None:
+            raise self.error
+        return ProviderResponse.from_rows(provider=self.provider_name, endpoint=endpoint, rows=self.rows)
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=self.error is None)
+
+
 class FakeCninfoProvider(ExternalDataProvider):
     provider_name = "cninfo"
 
@@ -213,7 +329,7 @@ class FakeCninfoProvider(ExternalDataProvider):
                     "name": "平安银行",
                     "ann_date": "2026-05-22",
                     "title": "2025年度报告",
-                    "event_type": "performance_forecast_report",
+                    "event_type": "performance_report_forecast",
                     "event_label_zh": "业绩预告/报告",
                     "sentiment": "mixed",
                     "category": "年度报告",
@@ -419,6 +535,64 @@ class PermissionDeniedTushareProvider(ExternalDataProvider):
         return ProviderHealth(provider=self.provider_name, ok=True)
 
 
+class SecretRuntimeFailureProvider(ExternalDataProvider):
+    provider_name = "secret_failure"
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        raise RuntimeError(self.message)
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=False)
+
+
+class InvalidSymbolCninfoProvider(ExternalDataProvider):
+    provider_name = "cninfo"
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        raise GatewayError(GatewayErrorCode.INVALID_SYMBOL, "CNINFO rejected the stock code.")
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=True)
+
+
+class MissingNewsFieldsTushareProvider(ExternalDataProvider):
+    provider_name = "tushare"
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        assert endpoint == "news"
+        return ProviderResponse.from_rows(
+            provider=self.provider_name,
+            endpoint=endpoint,
+            rows=[{"datetime": "2026-05-22 09:00:00"}],
+        )
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=True)
+
+
+class RateLimitedStocktwitsProvider(ExternalDataProvider):
+    provider_name = "stocktwits"
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        raise GatewayError(GatewayErrorCode.RATE_LIMITED, "Stocktwits rate limit exceeded.")
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=True)
+
+
+class EmptyStocktwitsProvider(ExternalDataProvider):
+    provider_name = "stocktwits"
+
+    def fetch(self, endpoint: str, params: dict, fields: str | None = None) -> ProviderResponse:
+        return ProviderResponse.from_rows(provider=self.provider_name, endpoint=endpoint, rows=[])
+
+    def health_check(self) -> ProviderHealth:
+        return ProviderHealth(provider=self.provider_name, ok=True)
+
+
 class NewsWithoutTitleTushareProvider(ExternalDataProvider):
     provider_name = "tushare"
 
@@ -439,6 +613,29 @@ class NewsWithoutTitleTushareProvider(ExternalDataProvider):
 
     def health_check(self) -> ProviderHealth:
         return ProviderHealth(provider=self.provider_name, ok=True)
+
+
+def _sec_row(
+    *,
+    accession_number: str = "0000320193-26-000001",
+    title: str = "10-Q quarterly report",
+    source_url: str = "https://www.sec.gov/Archives/edgar/data/320193/shared-url.htm",
+    raw_hash: str | None = None,
+) -> dict:
+    return {
+        "cik": "0000320193",
+        "entity_name": "Apple Inc.",
+        "market": "US",
+        "form": "10-Q",
+        "filing_date": "2026-05-29",
+        "accession_number": accession_number,
+        "primary_document": "aapl-20260529.htm",
+        "title": title,
+        "source_url": source_url,
+        "raw_hash": raw_hash or f"hash-{accession_number}",
+        "blob_uri": "bronze/sec_edgar/submissions/CIK0000320193.json",
+        "metadata_only": True,
+    }
 
 
 def make_client(tmp_path, provider_overrides: dict[str, ExternalDataProvider] | None = None) -> TestClient:
@@ -1088,6 +1285,210 @@ def test_source_events_official_filings_return_trusted_fact_rows_and_cache(tmp_p
         connection.close()
 
 
+def test_source_events_emit_governance_metadata_and_registry_fields(tmp_path) -> None:
+    client = make_client(tmp_path, {"sec_edgar": FakeSecEdgarProvider()})
+
+    response = client.get("/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    row = body["data"]["rows"][0]
+    assert row["governance"]["owner_service"] == "stock-data-gateway"
+    assert row["governance"]["permission_status"] == "public_allowed"
+    assert row["governance"]["robots_tos_status"] == "allowed"
+    assert row["governance"]["request_policy"]["timeout_seconds"] == 12.0
+    assert body["meta"]["governance"]["owner_service"] == "stock-data-gateway"
+
+    connection = sqlite3.connect(tmp_path / "market_data.sqlite3")
+    try:
+        registry_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(source_registry)").fetchall()
+        }
+        assert {
+            "permission_status",
+            "robots_tos_status",
+            "redistribution_policy",
+            "anti_bot_risk",
+            "owner_service",
+            "parser_version",
+            "request_policy_json",
+        } <= registry_columns
+        registry = connection.execute(
+            """
+            SELECT owner_service, parser_version, permission_status, request_policy_json
+            FROM source_registry
+            WHERE source_id = 'sec_edgar'
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert registry[0] == "stock-data-gateway"
+    assert registry[1] == "source-events.v1"
+    assert registry[2] == "public_allowed"
+    assert json.loads(registry[3])["cache_ttl_seconds"] == 86400
+
+
+def test_source_event_dedupe_reuses_existing_event_for_duplicate_url(tmp_path) -> None:
+    shared_url = "https://www.sec.gov/Archives/edgar/data/320193/shared-duplicate.htm"
+    provider = SequencedSecEdgarProvider(
+        [
+            _sec_row(accession_number="0000320193-26-000010", source_url=shared_url, raw_hash="same-content"),
+            _sec_row(accession_number="0000320193-26-000011", source_url=shared_url, raw_hash="same-content"),
+        ]
+    )
+    client = make_client(tmp_path, {"sec_edgar": provider})
+
+    first = client.get(
+        "/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true"
+    )
+    second = client.get(
+        "/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true"
+    )
+
+    first_row = first.json()["data"]["rows"][0]
+    second_row = second.json()["data"]["rows"][0]
+    assert first_row["freshness"]["state"] == "new"
+    assert second_row["source_event_id"] == first_row["source_event_id"]
+    assert second_row["freshness"]["state"] == "unchanged"
+    assert second_row["freshness"]["duplicate_of"] == first_row["source_event_id"]
+    assert second_row["freshness"]["first_seen_at"] == first_row["freshness"]["first_seen_at"]
+    assert second_row["freshness"]["last_seen_at"] >= first_row["freshness"]["last_seen_at"]
+
+    connection = sqlite3.connect(tmp_path / "market_data.sqlite3")
+    try:
+        count = connection.execute("SELECT COUNT(*) FROM source_events").fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 1
+
+
+def test_source_event_dedupe_keeps_same_title_with_different_url(tmp_path) -> None:
+    provider = SequencedSecEdgarProvider(
+        [
+            _sec_row(
+                accession_number="0000320193-26-000020",
+                title="Shared title",
+                source_url="https://www.sec.gov/one.htm",
+            ),
+            _sec_row(
+                accession_number="0000320193-26-000021",
+                title="Shared title",
+                source_url="https://www.sec.gov/two.htm",
+            ),
+        ]
+    )
+    client = make_client(tmp_path, {"sec_edgar": provider})
+
+    client.get("/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true")
+    client.get("/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true")
+
+    connection = sqlite3.connect(tmp_path / "market_data.sqlite3")
+    try:
+        count = connection.execute("SELECT COUNT(*) FROM source_events").fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 2
+
+
+def test_source_event_freshness_detects_parser_version_change(tmp_path, monkeypatch) -> None:
+    import stock_data_gateway.source_events as source_events_module
+
+    provider = SequencedSecEdgarProvider(
+        [
+            _sec_row(accession_number="0000320193-26-000030"),
+            _sec_row(accession_number="0000320193-26-000030"),
+        ]
+    )
+    client = make_client(tmp_path, {"sec_edgar": provider})
+
+    first = client.get(
+        "/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true"
+    )
+    monkeypatch.setattr(source_events_module, "_PARSER_VERSION", "source-events.v2")
+    second = client.get(
+        "/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true"
+    )
+
+    assert first.json()["data"]["rows"][0]["freshness"]["parser_version"] == "source-events.v1"
+    freshness = second.json()["data"]["rows"][0]["freshness"]
+    assert freshness["state"] == "updated"
+    assert freshness["parser_version"] == "source-events.v2"
+    assert freshness["previous_parser_version"] == "source-events.v1"
+    assert freshness["parser_version_changed"] is True
+
+
+def test_source_event_cache_read_marks_stale_rows(tmp_path) -> None:
+    client = make_client(tmp_path, {"sec_edgar": FakeSecEdgarProvider()})
+
+    client.get("/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true")
+    connection = sqlite3.connect(tmp_path / "market_data.sqlite3")
+    try:
+        connection.execute("UPDATE source_events SET last_seen_at = '2000-01-01T00:00:00+00:00'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    response = client.get("/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1")
+
+    assert response.status_code == 200
+    row = response.json()["data"]["rows"][0]
+    assert row["freshness"]["state"] == "stale"
+    assert row["freshness"]["last_seen_at"] == "2000-01-01T00:00:00+00:00"
+
+
+def test_source_event_transient_failure_is_not_negative_cached(tmp_path) -> None:
+    provider = FlakySecEdgarProvider()
+    client = make_client(tmp_path, {"sec_edgar": provider})
+
+    failed = client.get(
+        "/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true"
+    )
+    provider.fail = False
+    recovered = client.get(
+        "/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1&force_refresh=true"
+    )
+
+    assert failed.status_code == 200
+    assert failed.json()["meta"]["status"] == "degraded"
+    assert recovered.status_code == 200
+    assert recovered.json()["data"]["rows"][0]["freshness"]["state"] == "new"
+    connection = sqlite3.connect(tmp_path / "market_data.sqlite3")
+    try:
+        count = connection.execute("SELECT COUNT(*) FROM source_events").fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 1
+
+
+def test_source_events_provider_failure_degrades_without_secret_leakage(tmp_path) -> None:
+    secret_message = "token=abc123 cookie=bad Authorization: Bearer hidden /Users/mikezhang/.secret"
+    client = make_client(tmp_path, {"sec_edgar": SecretRuntimeFailureProvider(secret_message)})
+
+    response = client.get("/api/v1/market-data/source-events/official-filings?cik=0000320193&limit=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["rows"] == []
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == GatewayErrorCode.PROVIDER_UNAVAILABLE.value
+    assert body["meta"]["provider_attempts"] == [
+        {"provider": "cache", "status": "miss"},
+        {"provider": "sec_edgar", "status": "failed", "reason": GatewayErrorCode.PROVIDER_UNAVAILABLE.value},
+    ]
+    assert "abc123" not in response.text
+    assert "hidden" not in response.text
+    assert ".secret" not in response.text
+
+    connection = sqlite3.connect(tmp_path / "market_data.sqlite3")
+    try:
+        warning_message = connection.execute("SELECT warning_message FROM source_fetch_runs").fetchone()[0]
+    finally:
+        connection.close()
+    assert "abc123" not in warning_message
+    assert "hidden" not in warning_message
+    assert ".secret" not in warning_message
+
+
 def test_source_events_news_context_returns_context_only_tushare_rows(tmp_path) -> None:
     client = make_client(tmp_path)
 
@@ -1109,6 +1510,25 @@ def test_source_events_news_context_returns_context_only_tushare_rows(tmp_path) 
     assert body["meta"]["source_quality"]["skipped_noise_count"] == 0
 
 
+def test_source_events_news_context_missing_fields_degrades_with_stable_warning(tmp_path) -> None:
+    client = make_client(tmp_path, {"tushare": MissingNewsFieldsTushareProvider()})
+
+    response = client.get(
+        "/api/v1/market-data/source-events/news-context"
+        "?src=sina&start_datetime=2026-05-22%2009:00:00&end_datetime=2026-05-22%2010:00:00&limit=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["rows"] == []
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == GatewayErrorCode.EMPTY_DATA.value
+    assert body["meta"]["provider_attempts"] == [
+        {"provider": "cache", "status": "miss"},
+        {"provider": "tushare", "status": "failed", "reason": GatewayErrorCode.EMPTY_DATA.value},
+    ]
+
+
 def test_source_events_official_disclosures_return_trusted_metadata_rows(tmp_path) -> None:
     cninfo = FakeCninfoProvider()
     client = make_client(tmp_path, {"cninfo": cninfo})
@@ -1126,7 +1546,7 @@ def test_source_events_official_disclosures_return_trusted_metadata_rows(tmp_pat
     assert row["provider"] == "cninfo"
     assert row["trust_tier"] == "trusted_fact"
     assert row["entity_id"] == "000001"
-    assert row["event_type"] == "performance_forecast_report"
+    assert row["event_type"] == "performance_report_forecast"
     assert row["source_url"] == "https://static.cninfo.com.cn/finalpage/2026-05-22/123456.PDF"
     assert row["metadata_only"] is True
     assert body["meta"]["source_quality"]["label"] == "official_metadata"
@@ -1135,6 +1555,25 @@ def test_source_events_official_disclosures_return_trusted_metadata_rows(tmp_pat
         {"provider": "cninfo", "status": "ok"},
     ]
     assert len(cninfo.calls) == 1
+
+
+def test_source_events_official_disclosures_invalid_symbol_degrades_not_500(tmp_path) -> None:
+    client = make_client(tmp_path, {"cninfo": InvalidSymbolCninfoProvider()})
+
+    response = client.get(
+        "/api/v1/market-data/source-events/official-disclosures"
+        "?symbol=BAD&start_date=2026-05-22&end_date=2026-05-22&limit=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["rows"] == []
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == GatewayErrorCode.INVALID_SYMBOL.value
+    assert body["meta"]["provider_attempts"] == [
+        {"provider": "cache", "status": "miss"},
+        {"provider": "cninfo", "status": "failed", "reason": GatewayErrorCode.INVALID_SYMBOL.value},
+    ]
 
 
 def test_source_events_social_heat_is_disabled_by_default(tmp_path) -> None:
@@ -1171,6 +1610,34 @@ def test_source_events_social_heat_enabled_returns_heat_signal_only_rows(tmp_pat
     assert len(stocktwits.calls) == 1
 
 
+def test_source_events_social_heat_rate_limited_degrades_not_500(tmp_path) -> None:
+    client = make_client(tmp_path, {"stocktwits": RateLimitedStocktwitsProvider()})
+
+    response = client.get("/api/v1/market-data/source-events/social-heat?symbol=AAPL&limit=1&enabled=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["rows"] == []
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == GatewayErrorCode.RATE_LIMITED.value
+    assert body["meta"]["provider_attempts"] == [
+        {"provider": "cache", "status": "miss"},
+        {"provider": "stocktwits", "status": "failed", "reason": GatewayErrorCode.RATE_LIMITED.value},
+    ]
+
+
+def test_source_events_social_heat_empty_result_degrades(tmp_path) -> None:
+    client = make_client(tmp_path, {"stocktwits": EmptyStocktwitsProvider()})
+
+    response = client.get("/api/v1/market-data/source-events/social-heat?symbol=AAPL&limit=1&enabled=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["rows"] == []
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == GatewayErrorCode.EMPTY_DATA.value
+
+
 def test_source_events_news_permission_smoke_reports_tushare_access(tmp_path) -> None:
     client = make_client(tmp_path)
 
@@ -1201,6 +1668,297 @@ def test_source_events_news_permission_smoke_reports_tushare_access(tmp_path) ->
     assert body["meta"]["provider_attempts"] == [{"provider": "tushare", "src": "sina", "status": "ok"}]
 
 
+def test_source_events_capabilities_route_returns_inventory(tmp_path) -> None:
+    client = make_client(tmp_path)
+
+    response = client.get("/api/v1/market-data/source-events/capabilities")
+
+    assert response.status_code == 200
+    body = response.json()
+    rows = body["data"]["rows"]
+    assert body["meta"]["provider"] == "local_gateway"
+    assert body["meta"]["endpoint"] == "source_event_capabilities"
+    assert {
+        "source_id",
+        "provider",
+        "route",
+        "status",
+        "enabled_by_default",
+        "credential_required",
+        "permission_probe_available",
+        "trust_tier",
+        "license_scope",
+        "retention_policy",
+        "cache_policy",
+        "last_acceptance_status",
+        "known_limitations",
+    } <= rows[0].keys()
+    by_source = {row["source_id"]: row for row in rows}
+    assert by_source["official_filings"]["provider"] == "sec_edgar"
+    assert by_source["official_filings"]["trust_tier"] == "trusted_fact"
+    assert by_source["news_context"]["credential_required"] is True
+    assert by_source["news_context"]["permission_probe_available"] is True
+    assert by_source["social_heat"]["enabled_by_default"] is False
+    assert by_source["social_heat"]["status"] == "disabled_by_default"
+
+
+def test_official_source_registry_route_returns_seed_pack(tmp_path) -> None:
+    client = make_client(tmp_path)
+
+    response = client.get("/api/v1/market-data/source-events/official-source-registry")
+
+    assert response.status_code == 200
+    body = response.json()
+    rows = body["data"]["rows"]
+    assert body["meta"]["endpoint"] == "official_source_registry"
+    assert len(rows) >= 5
+    by_source = {row["source_id"]: row for row in rows}
+    assert by_source["sec_press_releases"]["enabled"] is True
+    assert by_source["sec_press_releases"]["parser_strategy"] == "rss"
+    assert by_source["csrc_press_releases"]["enabled"] is False
+    assert by_source["csrc_press_releases"]["permission_status"] == "unknown"
+
+
+def test_official_source_events_fetches_enabled_registry_sources(tmp_path) -> None:
+    feed = FakeOfficialFeedProvider()
+    client = make_client(tmp_path, {"official_feed": feed})
+
+    response = client.get("/api/v1/market-data/source-events/official-sources?limit=5")
+
+    assert response.status_code == 200
+    body = response.json()
+    rows = body["data"]["rows"]
+    assert body["meta"]["endpoint"] == "official_sources"
+    assert body["meta"]["status"] == "ok"
+    assert {row["source_id"] for row in rows} == {"sec_press_releases", "federal_reserve_press_releases"}
+    assert all(row["trust_tier"] == "trusted_fact" for row in rows)
+    assert all(row["metadata_only"] is True for row in rows)
+    assert {call[1]["source"]["source_id"] for call in feed.calls} == {
+        "sec_press_releases",
+        "federal_reserve_press_releases",
+    }
+    with sqlite3.connect(tmp_path / "market_data.sqlite3") as connection:
+        registry = connection.execute(
+            "SELECT permission_status, robots_tos_status, owner_service FROM source_registry WHERE source_id = ?",
+            ("sec_press_releases",),
+        ).fetchone()
+    assert registry == ("public_allowed", "allowed", "stock-data-gateway")
+
+
+def test_official_source_events_skip_disabled_sources_by_default(tmp_path) -> None:
+    feed = FakeOfficialFeedProvider()
+    client = make_client(tmp_path, {"official_feed": feed})
+
+    response = client.get("/api/v1/market-data/source-events/official-sources?source_id=csrc_press_releases")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == "NO_ENABLED_OFFICIAL_SOURCES"
+    assert body["data"]["rows"] == []
+    assert feed.calls == []
+
+
+def test_open_news_index_route_returns_context_only_metadata(tmp_path) -> None:
+    gdelt = FakeGdeltProvider()
+    client = make_client(tmp_path, {"gdelt": gdelt})
+
+    response = client.get(
+        "/api/v1/market-data/source-events/open-news-index"
+        "?query=Apple%20AI&start_datetime=2026-06-04T00:00:00Z&limit=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    row = body["data"]["rows"][0]
+    assert body["meta"]["endpoint"] == "open_news_index"
+    assert row["source_id"] == "gdelt_doc"
+    assert row["source_type"] == "open_news_index"
+    assert row["provider"] == "gdelt"
+    assert row["trust_tier"] == "context_only"
+    assert row["metadata_only"] is True
+    assert row["source_domain"] == "example.com"
+    assert row["extraction"]["text_available"] == "metadata_only"
+    assert row["governance"]["request_policy"]["per_domain_pacing_seconds"] == 5.0
+    assert gdelt.calls[0][1]["query"] == "Apple AI"
+
+
+def test_open_news_index_route_degrades_on_provider_failure(tmp_path) -> None:
+    gdelt = FakeGdeltProvider(error=GatewayError(GatewayErrorCode.PROVIDER_UNAVAILABLE, "rate limited token=abc123"))
+    client = make_client(tmp_path, {"gdelt": gdelt})
+
+    response = client.get("/api/v1/market-data/source-events/open-news-index?query=Apple&limit=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == GatewayErrorCode.PROVIDER_UNAVAILABLE.value
+    assert body["data"]["rows"] == []
+    assert "abc123" not in response.text
+
+
+def test_industry_media_route_fetches_allowlisted_feed_as_research_context(tmp_path) -> None:
+    feed = FakeOfficialFeedProvider()
+    client = make_client(tmp_path, {"official_feed": feed})
+
+    response = client.get("/api/v1/market-data/source-events/industry-media?limit=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    row = body["data"]["rows"][0]
+    assert body["meta"]["endpoint"] == "industry_media"
+    assert row["source_id"] == "pv_tech_news"
+    assert row["source_type"] == "public_industry_media"
+    assert row["provider"] == "pv_tech"
+    assert row["trust_tier"] == "research_context"
+    assert row["metadata_only"] is True
+    assert row["governance"]["robots_tos_status"] == "allowed"
+    assert feed.calls[0][1]["source"]["source_kind"] == "industry_media"
+
+
+def test_unified_narrative_source_events_query_filters_and_paginates_mixed_sources(tmp_path) -> None:
+    client = make_client(
+        tmp_path,
+        {
+            "sec_edgar": FakeSecEdgarProvider(),
+            "cninfo": FakeCninfoProvider(),
+        },
+    )
+
+    first = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?source_kind=official_filings,official_disclosures"
+        "&symbol=AAPL&limit=1&trust_tier=trusted_fact"
+    )
+
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["meta"]["endpoint"] == "narrative_source_events"
+    assert first_body["meta"]["pagination"]["limit"] == 1
+    assert first_body["meta"]["pagination"]["next_cursor"] == "1"
+    assert first_body["meta"]["status"] == "ok"
+    assert len(first_body["data"]["rows"]) == 1
+    assert first_body["data"]["rows"][0]["trust_tier"] == "trusted_fact"
+    assert first_body["data"]["rows"][0]["provider_metadata"]["governance"]["owner_service"] == "stock-data-gateway"
+    assert first_body["data"]["rows"][0]["provider_metadata"]["freshness"]["state"] == "new"
+
+    second = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?source_kind=official_filings,official_disclosures"
+        "&symbol=AAPL&limit=1&cursor=1"
+    )
+    second_body = second.json()
+
+    assert second.status_code == 200
+    assert second_body["meta"]["pagination"]["cursor"] == "1"
+    assert second_body["meta"]["pagination"]["next_cursor"] is None
+    assert second_body["data"]["rows"][0]["source_provider"] == "cninfo"
+    assert {attempt["source_kind"] for attempt in second_body["meta"]["provider_attempts"]} == {
+        "official_filings",
+        "official_disclosures",
+    }
+
+    provider_filtered = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?source_kind=official_filings,official_disclosures"
+        "&symbol=AAPL&limit=5&source_provider=sec_edgar"
+    )
+    provider_filtered_body = provider_filtered.json()
+    assert provider_filtered.status_code == 200
+    assert {row["source_provider"] for row in provider_filtered_body["data"]["rows"]} == {"sec_edgar"}
+
+
+def test_unified_narrative_source_events_query_includes_official_sources(tmp_path) -> None:
+    client = make_client(tmp_path, {"official_feed": FakeOfficialFeedProvider()})
+
+    response = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?source_kind=official_sources&limit=1&trust_tier=trusted_fact"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    row = body["data"]["rows"][0]
+    assert row["source_type"] == "official"
+    assert row["source_provider"] == "sec"
+    assert row["trust_tier"] == "trusted_fact"
+    assert row["provider_metadata"]["source_kind"] == "official_sources"
+    assert row["provider_metadata"]["governance"]["permission_status"] == "public_allowed"
+    assert body["meta"]["pagination"]["next_cursor"] == "1"
+
+
+def test_unified_narrative_source_events_query_includes_open_news_index(tmp_path) -> None:
+    client = make_client(tmp_path, {"gdelt": FakeGdeltProvider()})
+
+    response = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?source_kind=open_news_index&keyword=Apple%20AI&limit=1&trust_tier=context_only"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    row = body["data"]["rows"][0]
+    assert row["source_type"] == "news"
+    assert row["source_provider"] == "gdelt"
+    assert row["trust_tier"] == "context_only"
+    assert row["provider_metadata"]["source_kind"] == "open_news_index"
+    assert row["provider_metadata"]["source_domain"] == "example.com"
+    assert row["provider_metadata"]["extraction"]["text_available"] == "metadata_only"
+
+
+def test_unified_narrative_source_events_query_includes_industry_media(tmp_path) -> None:
+    client = make_client(tmp_path, {"official_feed": FakeOfficialFeedProvider()})
+
+    response = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?source_kind=industry_media&limit=1&trust_tier=research_context"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    row = body["data"]["rows"][0]
+    assert row["source_type"] == "news"
+    assert row["source_provider"] == "pv_tech"
+    assert row["trust_tier"] == "research_context"
+    assert row["provider_metadata"]["source_kind"] == "industry_media"
+
+
+def test_unified_narrative_source_events_query_empty_filter_is_not_degraded(tmp_path) -> None:
+    client = make_client(tmp_path, {"sec_edgar": FakeSecEdgarProvider()})
+
+    response = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?source_kind=official_filings&keyword=definitely-not-present&limit=5"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["rows"] == []
+    assert body["meta"]["status"] == "ok"
+    assert body["meta"]["pagination"]["total"] == 0
+    assert body["meta"]["degradation_events"] == []
+
+
+def test_unified_narrative_source_events_query_degrades_when_all_sources_fail(tmp_path) -> None:
+    client = make_client(tmp_path, {"sec_edgar": SecretRuntimeFailureProvider("network timeout token=abc123")})
+
+    response = client.get("/api/v1/market-data/narrative/source-events?source_kind=official_filings&limit=5")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["rows"] == []
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == "ALL_SOURCES_DEGRADED"
+    assert body["meta"]["degradation_events"][0]["code"] == GatewayErrorCode.PROVIDER_UNAVAILABLE.value
+    assert body["meta"]["provider_attempts"][-1] == {
+        "source_kind": "official_filings",
+        "provider": "sec_edgar",
+        "status": "failed",
+        "reason": GatewayErrorCode.PROVIDER_UNAVAILABLE.value,
+    }
+    assert "abc123" not in response.text
+
+
 def test_narrative_source_events_official_filings_post_matches_fni_contract(tmp_path) -> None:
     sec = FakeSecEdgarProvider()
     client = make_client(tmp_path, {"sec_edgar": sec})
@@ -1213,6 +1971,31 @@ def test_narrative_source_events_official_filings_post_matches_fni_contract(tmp_
     assert response.status_code == 200
     body = response.json()
     row = body["data"]["rows"][0]
+    required_fields = {
+        "source_event_id",
+        "source_type",
+        "source_provider",
+        "source_url",
+        "title",
+        "event_time",
+        "fetched_at",
+        "trust_tier",
+        "source_quality",
+        "license_scope",
+        "retention_policy",
+        "metadata_only",
+        "degradation_events",
+        "summary",
+        "stock_codes",
+        "narrative_hints",
+        "evidence_claims",
+        "provider_metadata",
+        "source_document_id",
+        "source_document_title",
+        "source_document_url",
+        "excerpt",
+    }
+    assert required_fields <= row.keys()
     assert row["source_event_id"] == "sec_edgar:0000320193:0000320193-26-000001"
     assert row["source_type"] == "filing"
     assert row["source_provider"] == "sec_edgar"
