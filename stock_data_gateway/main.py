@@ -41,6 +41,28 @@ from stock_data_gateway.source_events import SourceEventResult, SourceEventServi
 
 JSON_BODY = Body(default_factory=dict)
 _FETCH_SEMAPHORE = threading.BoundedSemaphore(int(os.getenv("GATEWAY_FETCH_CONCURRENCY", "4")))
+_SELECTED_TOPIC_PROFILES: tuple[dict[str, Any], ...] = (
+    {
+        "topic_id": "ai_infrastructure",
+        "canonical_topic": "AI infrastructure",
+        "aliases": ("ai infrastructure", "artificial intelligence infrastructure", "ai data center", "ai datacenter"),
+        "query_terms": ("AI infrastructure", "data center", "GPU", "AI chips", "semiconductor", "hyperscaler"),
+        "open_news_query": '"AI infrastructure" OR "data center" OR GPU OR semiconductor',
+        "source_kinds": ("official_filings", "official_sources", "news_context", "open_news_index", "industry_media"),
+        "seed_symbols": ("NVDA", "MSFT", "AAPL"),
+        "relevant_domains": ("nvidia.com", "microsoft.com", "apple.com"),
+    },
+    {
+        "topic_id": "solar_storage",
+        "canonical_topic": "solar/storage",
+        "aliases": ("solar/storage", "solar storage", "solar and storage", "battery storage", "grid storage"),
+        "query_terms": ("solar/storage", "solar storage", "battery storage", "grid storage", "renewable storage"),
+        "open_news_query": '"solar storage" OR "battery storage" OR "grid storage" OR "renewable storage"',
+        "source_kinds": ("official_filings", "official_sources", "news_context", "open_news_index", "industry_media"),
+        "seed_symbols": ("TSLA",),
+        "relevant_domains": ("pv-tech.org", "energy-storage.news"),
+    },
+)
 
 
 @asynccontextmanager
@@ -696,14 +718,17 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
                 timeout_seconds,
                 upstream_timeout_seconds,
             )
-            source_kinds = _unified_source_kinds(source_kind)
-            symbols = _optional_symbols(symbol)
+            topic_profile = _selected_topic_profile(keyword)
+            source_kinds = _unified_source_kinds(source_kind, topic_profile=topic_profile)
+            requested_symbols = _optional_symbols(symbol)
+            fetch_symbols = _topic_fetch_symbols(requested_symbols, topic_profile)
             with _fetch_slot():
                 collected = _collect_narrative_source_events(
                     app=app,
                     source_kinds=source_kinds,
-                    symbols=symbols,
+                    symbols=fetch_symbols,
                     query=keyword,
+                    topic_profile=topic_profile,
                     fetch_limit=min(resolved_limit + offset + 1, 100),
                     start_time=start_time,
                     end_time=end_time,
@@ -715,10 +740,11 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
                 source_provider=source_provider,
                 entity_id=entity_id,
                 keyword=keyword,
+                topic_profile=topic_profile,
                 start_time=start_time,
                 end_time=end_time,
                 trust_tier=trust_tier,
-                symbols=symbols,
+                symbols=requested_symbols,
             )
             page_rows = filtered_rows[offset : offset + resolved_limit]
             payload = _normalized_payload(
@@ -728,8 +754,14 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
                 cache_mode=collected["cache_mode"],
                 cache_hit=collected["cache_hit"],
             )
+            topic_diagnostics = _topic_diagnostics(
+                topic_profile,
+                collected=collected,
+                filtered_rows=filtered_rows,
+            )
             payload["meta"].update(
                 {
+                    "owner_service": "stock-data-gateway",
                     "provider_attempts": collected["provider_attempts"],
                     "degradation_events": collected["degradation_events"],
                     "pagination": _pagination(
@@ -740,6 +772,8 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
                     ),
                     "source_kinds": source_kinds,
                     "source_quality": collected["source_quality"],
+                    "topic_profile": _public_topic_profile(topic_profile),
+                    "topic_diagnostics": topic_diagnostics,
                 }
             )
             if collected["all_sources_degraded"] and not collected["rows"]:
@@ -747,6 +781,13 @@ def create_app(gateway: Optional[ReadThroughQueryService] = None) -> FastAPI:
                 payload["meta"]["warning"] = {
                     "code": "ALL_SOURCES_DEGRADED",
                     "message": "All requested source-event providers returned degraded results.",
+                }
+            elif topic_profile is not None and not filtered_rows:
+                payload["meta"]["status"] = "degraded"
+                payload["meta"]["warning"] = {
+                    "code": "NO_SELECTED_TOPIC_SOURCE_EVENTS",
+                    "message": "No usable source events matched the selected narrative topic.",
+                    "topic_id": topic_profile["topic_id"],
                 }
             elif collected["any_source_degraded"]:
                 payload["meta"]["status"] = "degraded"
@@ -1735,7 +1776,7 @@ def _narrative_stock_codes(row: dict[str, Any], *, requested_symbols: list[str])
     return []
 
 
-def _unified_source_kinds(source_kind: str) -> list[str]:
+def _unified_source_kinds(source_kind: str, *, topic_profile: dict[str, Any] | None = None) -> list[str]:
     allowed = {
         "official_filings",
         "official_disclosures",
@@ -1746,6 +1787,8 @@ def _unified_source_kinds(source_kind: str) -> list[str]:
         "social_heat",
     }
     if not source_kind.strip():
+        if topic_profile is not None:
+            return list(topic_profile["source_kinds"])
         return ["official_filings", "official_disclosures", "official_sources", "news_context", "social_heat"]
     values = [item.strip() for item in source_kind.split(",") if item.strip()]
     invalid = [value for value in values if value not in allowed]
@@ -1760,6 +1803,7 @@ def _collect_narrative_source_events(
     source_kinds: list[str],
     symbols: list[str],
     query: str,
+    topic_profile: dict[str, Any] | None,
     fetch_limit: int,
     start_time: str,
     end_time: str,
@@ -1770,12 +1814,14 @@ def _collect_narrative_source_events(
     provider_attempts: list[dict[str, Any]] = []
     degradation_events: list[dict[str, Any]] = []
     results: list[SourceEventResult] = []
+    source_kind_statuses: dict[str, dict[str, Any]] = {}
     for source_kind in source_kinds:
         result = _fetch_unified_source_kind(
             app=app,
             source_kind=source_kind,
             symbols=symbols,
             query=query,
+            topic_profile=topic_profile,
             fetch_limit=fetch_limit,
             start_time=start_time,
             end_time=end_time,
@@ -1783,6 +1829,12 @@ def _collect_narrative_source_events(
             upstream_timeout_seconds=upstream_timeout_seconds,
         )
         results.append(result)
+        source_kind_statuses[source_kind] = {
+            "status": result.status,
+            "raw_row_count": len(result.rows),
+            "usable_row_count": 0,
+            "warning": result.warning,
+        }
         provider_attempts.extend(
             {"source_kind": source_kind, **attempt}
             for attempt in result.metadata.get("provider_attempts", [])
@@ -1804,11 +1856,14 @@ def _collect_narrative_source_events(
                 **narrative_row["provider_metadata"],
                 "source_kind": source_kind,
             }
+            if topic_profile is not None:
+                narrative_row = _with_topic_metadata(narrative_row, topic_profile)
             rows.append(narrative_row)
     return {
         "rows": rows,
         "provider_attempts": provider_attempts,
         "degradation_events": degradation_events,
+        "source_kind_statuses": source_kind_statuses,
         "cache_hit": bool(results and all(result.cache_hit for result in results)),
         "cache_mode": "cache" if results and all(result.cache_hit for result in results) else "mixed",
         "any_source_degraded": any(result.status == "degraded" for result in results),
@@ -1823,6 +1878,7 @@ def _fetch_unified_source_kind(
     source_kind: str,
     symbols: list[str],
     query: str,
+    topic_profile: dict[str, Any] | None,
     fetch_limit: int,
     start_time: str,
     end_time: str,
@@ -1862,7 +1918,7 @@ def _fetch_unified_source_kind(
     if source_kind == "open_news_index":
         start_datetime, end_datetime = _source_event_datetime_range(start_time, end_time)
         return service.open_news_index(
-            query=query or "markets",
+            query=_source_kind_query(query, topic_profile, source_kind) or "markets",
             start_datetime=start_datetime,
             end_datetime=end_datetime,
             limit=min(fetch_limit, 50),
@@ -1875,7 +1931,7 @@ def _fetch_unified_source_kind(
             src="sina",
             start_datetime=start_datetime,
             end_datetime=end_datetime,
-            query=query,
+            query=_source_kind_query(query, topic_profile, source_kind),
             limit=fetch_limit,
             request_timeout_seconds=request_timeout_seconds,
             upstream_timeout_seconds=upstream_timeout_seconds,
@@ -1895,6 +1951,7 @@ def _filter_narrative_source_rows(
     source_provider: str,
     entity_id: str,
     keyword: str,
+    topic_profile: dict[str, Any] | None,
     start_time: str,
     end_time: str,
     trust_tier: str,
@@ -1912,12 +1969,7 @@ def _filter_narrative_source_rows(
             if str(row.get("provider_metadata", {}).get("entity_id") or "").upper() == requested_entity
         ]
     if keyword.strip():
-        needle = keyword.strip().lower()
-        filtered = [
-            row
-            for row in filtered
-            if needle in f"{row.get('title', '')} {row.get('summary', '')} {row.get('excerpt', '')}".lower()
-        ]
+        filtered = [row for row in filtered if _row_matches_keyword(row, keyword, topic_profile)]
     if trust_tier.strip():
         tier = trust_tier.strip()
         filtered = [row for row in filtered if row.get("trust_tier") == tier]
@@ -1933,6 +1985,144 @@ def _filter_narrative_source_rows(
             if _time_in_range(str(row.get("event_time") or ""), start_time=start_time, end_time=end_time)
         ]
     return filtered
+
+
+def _selected_topic_profile(keyword: str) -> dict[str, Any] | None:
+    normalized = _topic_key(keyword)
+    if not normalized:
+        return None
+    for profile in _SELECTED_TOPIC_PROFILES:
+        candidates = [profile["canonical_topic"], *profile["aliases"]]
+        if normalized in {_topic_key(candidate) for candidate in candidates}:
+            return profile
+    return None
+
+
+def _topic_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    normalized = []
+    previous_space = False
+    for character in text:
+        if character.isalnum():
+            normalized.append(character)
+            previous_space = False
+        elif character in {"/", "&", "+", "-", "_"}:
+            if not previous_space:
+                normalized.append(" ")
+                previous_space = True
+        elif character.isspace() and not previous_space:
+            normalized.append(" ")
+            previous_space = True
+    return " ".join("".join(normalized).split())
+
+
+def _public_topic_profile(topic_profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if topic_profile is None:
+        return None
+    return {
+        "topic_id": topic_profile["topic_id"],
+        "canonical_topic": topic_profile["canonical_topic"],
+        "query_terms": list(topic_profile["query_terms"]),
+        "seed_symbols": list(topic_profile["seed_symbols"]),
+        "source_kinds": list(topic_profile["source_kinds"]),
+    }
+
+
+def _topic_fetch_symbols(requested_symbols: list[str], topic_profile: dict[str, Any] | None) -> list[str]:
+    if requested_symbols or topic_profile is None:
+        return requested_symbols
+    return list(topic_profile["seed_symbols"])
+
+
+def _source_kind_query(query: str, topic_profile: dict[str, Any] | None, source_kind: str) -> str:
+    if topic_profile is None:
+        return query
+    if source_kind == "open_news_index":
+        return str(topic_profile["open_news_query"])
+    return str(topic_profile["canonical_topic"])
+
+
+def _with_topic_metadata(row: dict[str, Any], topic_profile: dict[str, Any]) -> dict[str, Any]:
+    public_profile = _public_topic_profile(topic_profile) or {}
+    hints = [str(row.get("narrative_hints") or "").strip()] if isinstance(row.get("narrative_hints"), str) else []
+    if isinstance(row.get("narrative_hints"), list):
+        hints.extend(str(item).strip() for item in row["narrative_hints"] if str(item).strip())
+    hints.extend(str(item) for item in topic_profile["query_terms"])
+    hints = list(dict.fromkeys(item for item in hints if item))
+    return {
+        **row,
+        "narrative_hints": hints,
+        "provider_metadata": {
+            **row.get("provider_metadata", {}),
+            "topic_profile": public_profile,
+        },
+    }
+
+
+def _topic_diagnostics(
+    topic_profile: dict[str, Any] | None,
+    *,
+    collected: dict[str, Any],
+    filtered_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if topic_profile is None:
+        return None
+    statuses = {
+        source_kind: dict(status)
+        for source_kind, status in collected.get("source_kind_statuses", {}).items()
+        if isinstance(status, dict)
+    }
+    for source_kind in statuses:
+        statuses[source_kind]["usable_row_count"] = sum(
+            1
+            for row in filtered_rows
+            if row.get("provider_metadata", {}).get("source_kind") == source_kind
+        )
+    return {
+        "topic_id": topic_profile["topic_id"],
+        "canonical_topic": topic_profile["canonical_topic"],
+        "raw_row_count": len(collected.get("rows", [])),
+        "usable_row_count": len(filtered_rows),
+        "source_kind_statuses": statuses,
+        "degradation_count": len(collected.get("degradation_events", [])),
+    }
+
+
+def _row_matches_keyword(row: dict[str, Any], keyword: str, topic_profile: dict[str, Any] | None) -> bool:
+    terms = [keyword.strip().lower()]
+    relevant_domains: tuple[str, ...] = ()
+    if topic_profile is not None:
+        terms.extend(str(term).strip().lower() for term in topic_profile["query_terms"])
+        terms.extend(str(alias).strip().lower() for alias in topic_profile["aliases"])
+        relevant_domains = tuple(str(domain).strip().lower() for domain in topic_profile["relevant_domains"])
+    terms = [term for term in dict.fromkeys(terms) if term]
+    provider_metadata = row.get("provider_metadata") if isinstance(row.get("provider_metadata"), dict) else {}
+    summary = str(row.get("summary") or "")
+    excerpt = str(row.get("excerpt") or "")
+    if topic_profile is not None and summary.lower().startswith("open news index metadata for "):
+        summary = ""
+        excerpt = ""
+    searchable = " ".join(
+        str(value or "")
+        for value in [
+            row.get("title"),
+            summary,
+            excerpt,
+            row.get("source_url"),
+            row.get("source_provider"),
+            provider_metadata.get("source_domain"),
+        ]
+    ).lower()
+    if any(term in searchable for term in terms):
+        return True
+    domain = str(provider_metadata.get("source_domain") or "").lower()
+    return bool(
+        domain
+        and any(
+            domain == relevant_domain or domain.endswith(f".{relevant_domain}")
+            for relevant_domain in relevant_domains
+        )
+    )
 
 
 def _pagination(*, cursor: str, offset: int, limit: int, total: int) -> dict[str, Any]:

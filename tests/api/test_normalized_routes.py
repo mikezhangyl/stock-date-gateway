@@ -1923,6 +1923,100 @@ def test_unified_narrative_source_events_query_includes_industry_media(tmp_path)
     assert row["provider_metadata"]["source_kind"] == "industry_media"
 
 
+def test_mik296_selected_ai_topic_expands_query_sources_and_topic_metadata(tmp_path) -> None:
+    gdelt = FakeGdeltProvider(
+        rows=[
+            {
+                "title": "Hyperscalers expand AI infrastructure data centers",
+                "source_url": "https://example.com/ai-infrastructure",
+                "source_domain": "example.com",
+                "published_at": "20260608100000",
+                "fetched_at": "2026-06-08T10:01:00Z",
+                "language": "English",
+                "source_country": "United States",
+                "provider_item_id": "gdelt-ai-infra-1",
+                "raw_hash": "gdelt-ai-infra-hash",
+                "metadata_only": True,
+            }
+        ]
+    )
+    client = make_client(tmp_path, {"gdelt": gdelt})
+
+    response = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?keyword=AI%20infrastructure&limit=5&upstream_timeout_seconds=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["owner_service"] == "stock-data-gateway"
+    assert body["meta"]["topic_profile"]["topic_id"] == "ai_infrastructure"
+    assert body["meta"]["topic_profile"]["canonical_topic"] == "AI infrastructure"
+    assert body["meta"]["source_kinds"] == [
+        "official_filings",
+        "official_sources",
+        "news_context",
+        "open_news_index",
+        "industry_media",
+    ]
+    assert {attempt["source_kind"] for attempt in body["meta"]["provider_attempts"]} >= {
+        "official_filings",
+        "official_sources",
+        "news_context",
+        "open_news_index",
+        "industry_media",
+    }
+    assert "AI infrastructure" in gdelt.calls[0][1]["query"]
+    assert "data center" in gdelt.calls[0][1]["query"]
+
+    row = next(row for row in body["data"]["rows"] if row["source_provider"] == "gdelt")
+    assert row["source_url"] == "https://example.com/ai-infrastructure"
+    assert row["title"] == "Hyperscalers expand AI infrastructure data centers"
+    assert row["trust_tier"] == "context_only"
+    assert "AI infrastructure" in row["narrative_hints"]
+    assert row["provider_metadata"]["source_kind"] == "open_news_index"
+    assert row["provider_metadata"]["topic_profile"]["topic_id"] == "ai_infrastructure"
+    assert row["provider_metadata"]["governance"]["owner_service"] == "stock-data-gateway"
+    assert row["provider_metadata"]["freshness"]["state"] == "new"
+
+
+def test_mik296_selected_solar_topic_reports_structured_no_data_after_filtering(tmp_path) -> None:
+    gdelt = FakeGdeltProvider(
+        rows=[
+            {
+                "title": "Unrelated bank earnings update",
+                "source_url": "https://example.com/bank-earnings",
+                "source_domain": "example.com",
+                "published_at": "20260608100000",
+                "fetched_at": "2026-06-08T10:01:00Z",
+                "language": "English",
+                "source_country": "United States",
+                "provider_item_id": "gdelt-unrelated-1",
+                "raw_hash": "gdelt-unrelated-hash",
+                "metadata_only": True,
+            }
+        ]
+    )
+    client = make_client(tmp_path, {"gdelt": gdelt})
+
+    response = client.get(
+        "/api/v1/market-data/narrative/source-events"
+        "?keyword=solar%2Fstorage&limit=5&upstream_timeout_seconds=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["rows"] == []
+    assert body["meta"]["status"] == "degraded"
+    assert body["meta"]["warning"]["code"] == "NO_SELECTED_TOPIC_SOURCE_EVENTS"
+    assert body["meta"]["warning"]["topic_id"] == "solar_storage"
+    assert body["meta"]["topic_profile"]["canonical_topic"] == "solar/storage"
+    assert body["meta"]["topic_diagnostics"]["usable_row_count"] == 0
+    assert body["meta"]["topic_diagnostics"]["raw_row_count"] > 0
+    assert body["meta"]["topic_diagnostics"]["source_kind_statuses"]["open_news_index"]["raw_row_count"] == 1
+    assert body["meta"]["topic_diagnostics"]["source_kind_statuses"]["open_news_index"]["usable_row_count"] == 0
+
+
 def test_unified_narrative_source_events_query_empty_filter_is_not_degraded(tmp_path) -> None:
     client = make_client(tmp_path, {"sec_edgar": FakeSecEdgarProvider()})
 
